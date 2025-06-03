@@ -78,7 +78,7 @@ while true; do
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
         fi
-        curl -s "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
+        wget -s "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
         echo "Bitrate réduit à $bitrate Mbps (RTT > 100ms)"
     else
         if [ "$bitrate" -ge "$bitratemax" ]; then
@@ -86,7 +86,7 @@ while true; do
         else
             bitrate=$((bitrate + interval))
             [ "$bitrate" -gt "$bitratemax" ] && bitrate=$bitratemax
-            curl -s "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
+            wget -s "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
             echo "Bitrate augmenté à $bitrate Mbps (+$interval Mbps)"
         fi
         
