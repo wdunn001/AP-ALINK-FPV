@@ -39,9 +39,9 @@ get_dynamic_interval() {
     dbm=$(get_dbm)
     echo $(awk -v d="$dbm" 'BEGIN {
         if (d > -40)      print 8;
-        else if (d > -60) print 6;
-        else if (d > -70) print 4;
-        else if (d > -80) print 2;
+        else if (d > -65) print 6;
+        else if (d > -75) print 4;
+        else if (d > -85) print 2;
         else              print 1;
     }')
 }
@@ -50,9 +50,9 @@ get_dynamic_max_bitrate() {
     dbm=$(get_dbm)
     echo $(awk -v d="$dbm" 'BEGIN {
         if (d > -75)      print 60;  
-        else if (d > -65) print 30;  
-        else if (d > -75) print 8;   
-        else if (d > -85) print 4;   
+        else if (d > -60) print 30;  
+        else if (d > -70) print 8;   
+        else if (d > -80) print 4;   
         else              print 1;   
     }')
 }
