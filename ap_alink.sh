@@ -57,6 +57,18 @@ get_dynamic_max_bitrate() {
     }')
 }
 
+
+get_dynamic_decrease() {
+    dbm=$(get_dbm)
+    echo $(awk -v d="$dbm" 'BEGIN {
+        if (d > -60)      print 2;    
+        else if (d > -75) print 3;  
+        else if (d > -85) print 5;    
+        else              print 7;    
+    }')
+}
+
+
 # BOUCLE PRINCIPALE
 while true; do
     sleep 1
@@ -64,6 +76,7 @@ while true; do
     rtt=$(get_max_rtt)
     interval=$(get_dynamic_intervals)
     bitratemax=$(get_dynamic_max_bitrate)
+    decrease=$(get_dynamic_decrease)
     if [ $? -ne 0 ]; then
         fail_count=$((fail_count + 1))
         echo "[$fail_count] Le GS $ip_gs est injoignable"
@@ -74,7 +87,7 @@ while true; do
     echo " Réponse GS — RTT max mesuré : $rtt ms"
 
     if [ "$dbm" -lt -80 ]; then
-        bitrate=$((bitrate - 2))
+        bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
         fi
