@@ -1,10 +1,9 @@
 #!/bin/sh
 
 # CONFIGURATION
-ip_gs="192.168.0.10"       # Adresse IP fixe du GS
-interval=4                 # Variation du bitrate en Mbps
+ip_gs="192.168.0.10"       # Adresse IP fixe du GS            
 bitrate=40               # Bitrate initial (en Mbps)
-bitratemax=50              # Bitrate maximum (en Mbps)
+bitratemax=60              # Bitrate maximum (en Mbps)
 bitratemin=0               # Bitrate minimum (en Mbps)
 
 fail_count=0               # Compteur de pannes GS
@@ -35,20 +34,40 @@ get_dbm() {
     
 }
 
+
+get_dynamic_interval() {
+    dbm=$(get_dbm)
+    echo $(awk -v d="$dbm" 'BEGIN {
+        if (d > -40)      print 8;
+        else if (d > -60) print 6;
+        else if (d > -75) print 4;
+        else if (d > -85) print 2;
+        else              print 1;
+    }')
+}
+
+get_dynamic_max_bitrate() {
+    dbm=$(get_dbm)
+    echo $(awk -v d="$dbm" 'BEGIN {
+        if (d > -75)      print 60;  
+        else if (d > -65) print 30;  
+        else if (d > -75) print 8;   
+        else if (d > -85) print 4;   
+        else              print 1;   
+    }')
+}
+
 # BOUCLE PRINCIPALE
 while true; do
     sleep 1
     dbm=$(get_dbm)
     rtt=$(get_max_rtt)
+    interval=$(get_dynamic_intervals)
+    bitratemax=$(get_dynamic_max_bitrate)
     if [ $? -ne 0 ]; then
         fail_count=$((fail_count + 1))
-        echo "[$fail_count] Le GS $ip_gs est injoignable — baisse du bitrate"
-        bitrate=$((bitrate - interval))
-        if [ "$bitrate" -lt "$bitratemin" ]; then
-            bitrate=$bitratemin
-        fi
-        cli -s .video0.bitrate $((bitrate * 1000))
-        echo "  Bitrate réduit à $bitrate Mbps (en attente de connexion)"
+        echo "[$fail_count] Le GS $ip_gs est injoignable"
+        echo " en attente de connexion"
         continue
     fi
 
@@ -63,14 +82,13 @@ while true; do
         echo "Bitrate réduit à $bitrate Mbps (RTT > 100ms)"
     else
         if [ "$bitrate" -ge "$bitratemax" ]; then
-            echo "Bitrate max déjà atteint ($bitrate Mbps)"
+            echo "Bitrate max dynamique atteint : $bitrate Mbps (limite : $bitratemax Mbps)"
         else
             bitrate=$((bitrate + interval))
-            if [ "$bitrate" -gt "$bitratemax" ]; then
-                bitrate=$bitratemax
-            fi
+            [ "$bitrate" -gt "$bitratemax" ] && bitrate=$bitratemax
             curl -s "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
-            echo "Bitrate augmenté à $bitrate Mbps"
+            echo "Bitrate augmenté à $bitrate Mbps (+$interval Mbps)"
         fi
+        
     fi
 done
