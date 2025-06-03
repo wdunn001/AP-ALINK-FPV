@@ -2,7 +2,7 @@
 
 # CONFIGURATION
 ip_gs="192.168.0.10"       # Adresse IP fixe du GS
-interval=7                 # Variation du bitrate en Mbps
+interval=4                 # Variation du bitrate en Mbps
 bitrate=40               # Bitrate initial (en Mbps)
 bitratemax=50              # Bitrate maximum (en Mbps)
 bitratemin=0               # Bitrate minimum (en Mbps)
