@@ -10,7 +10,7 @@ fail_count=0               # Compteur de pannes GS
 #auto=True 
 
 #txpowermax=2000 #for the moment is only for stock af1 without custom pa
-txpower_index=200
+txpower_index=300
 
 #soft tx power alg (sta)
 #will increase tx power at few db to get the link rock solid, is different to auto which will increase tx power at the maximum, here is just few db less or few db more around a base value 15db will become at max 17db for exemple and come to 15db after
@@ -45,7 +45,8 @@ get_dbm() {
 }
 
 get_tx_power() {
-    iw dev wlan0 info 2>/dev/null | grep 'tx power' | awk 'print{3}'
+    iw dev wlan0 info | grep 'tx power' | awk '{print $2}'
+
 }
 
 get_dynamic_txpower_interval() {
@@ -132,22 +133,25 @@ while true; do
     echo " Réponse GS — RTT max mesuré : $rtt ms"
 
     if [ "$dbm" -lt -80 ]; then
+        iw wlan0 set txpower fixed $((txpower_get - txpower_index))
         bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
+            
         fi
-        wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
-        iw wlan0 set txpower fixed $((txpower_get * 100 + txpower_index))
+        wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
+        
         echo "Bitrate réduit à $bitrate Mbps, up txpower"
     else
         if [ "$bitrate" -ge "$bitratemax" ]; then
             echo "Bitrate max dynamique atteint : $bitrate Mbps (limite : $bitratemax Mbps)"
         else
+            iw wlan0 set txpower fixed $((txpower_get - txpower_index))
             bitrate=$((bitrate + interval))
-            iw wlan0 set txpower fixed $((txpower_get * 100 - txpower_index))
+            
 
             [ "$bitrate" -gt "$bitratemax" ] && bitrate=$bitratemax
-            wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
+            wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
             echo "Bitrate augmenté à $bitrate Mbps (+$interval Mbps)"
         fi
         
