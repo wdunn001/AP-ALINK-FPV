@@ -86,7 +86,7 @@ while true; do
 
     echo " Réponse GS — RTT max mesuré : $rtt ms"
 
-    if [ "$dbm" -lt -70 ]; then
+    if [ "$dbm" -lt -80 ]; then
         bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
