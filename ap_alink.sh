@@ -45,7 +45,7 @@ get_dbm() {
 }
 
 get_tx_power() {
-    iw dev wlan0 info | grep 'tx power' | awk '{print $2}'
+    iw dev wlan0 info | grep 'txpower' | awk '{print $2}'
 
 }
 
