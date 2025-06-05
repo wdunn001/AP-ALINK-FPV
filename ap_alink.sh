@@ -10,7 +10,7 @@ fail_count=0               # Compteur de pannes GS
 #auto=True 
 
 #txpowermax=2000 #for the moment is only for stock af1 without custom pa
-txpower_index=300
+#txpower_index=300
 
 #soft tx power alg (sta)
 #will increase tx power at few db to get the link rock solid, is different to auto which will increase tx power at the maximum, here is just few db less or few db more around a base value 15db will become at max 17db for exemple and come to 15db after
@@ -44,10 +44,10 @@ get_dbm() {
     
 }
 
-get_tx_power() {
-    iw dev wlan0 info | grep 'txpower' | awk '{print $2}'
+#get_tx_power() {
+#    iw dev wlan0 info | grep 'txpower' | awk '{print $2}'
 
-}
+#}
 
 get_dynamic_txpower_interval() {
     powertx=$(get_tx_power)
@@ -101,16 +101,16 @@ get_dynamic_decrease() {
     dbm=$(get_dbm)
     echo $(awk -v d="$dbm" 'BEGIN {
         if (d > -60)      print 2;    
-        else if (d > -75) print 4;  
-        else if (d > -85) print 10;    
+        else if (d > -75) print 5;  
+        else if (d > -85) print 15;    
         else              print 20;    
     }')
 }
 
-txpower_get=$(get_tx_power)
+#txpower_get=$(get_tx_power)
 # BOUCLE PRINCIPALE
 while true; do
-    sleep 1
+    sleep 0.1
     
     #init variable
 
@@ -133,7 +133,7 @@ while true; do
     echo " Réponse GS — RTT max mesuré : $rtt ms"
 
     if [ "$dbm" -lt -80 ]; then
-        iw wlan0 set txpower fixed $((txpower_get - txpower_index))
+        #iw wlan0 set txpower fixed $((txpower_get - txpower_index))
         bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
@@ -146,7 +146,7 @@ while true; do
         if [ "$bitrate" -ge "$bitratemax" ]; then
             echo "Bitrate max dynamique atteint : $bitrate Mbps (limite : $bitratemax Mbps)"
         else
-            iw wlan0 set txpower fixed $((txpower_get - txpower_index))
+            #iw wlan0 set txpower fixed $((txpower_get - txpower_index))
             bitrate=$((bitrate + interval))
             
 
