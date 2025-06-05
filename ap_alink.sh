@@ -136,7 +136,7 @@ while true; do
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
         fi
-        curl -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
+        wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
         iw wlan0 set txpower fixed $((txpower_get * 100 + txpower_index))
         echo "Bitrate réduit à $bitrate Mbps, up txpower"
     else
@@ -147,7 +147,7 @@ while true; do
             iw wlan0 set txpower fixed $((txpower_get * 100 - txpower_index))
 
             [ "$bitrate" -gt "$bitratemax" ] && bitrate=$bitratemax
-            curl -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
+            wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1000))"
             echo "Bitrate augmenté à $bitrate Mbps (+$interval Mbps)"
         fi
         
