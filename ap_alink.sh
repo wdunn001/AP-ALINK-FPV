@@ -7,18 +7,7 @@ bitratemax=40              # Bitrate maximum (en Mbps)
 bitratemin=0               # Bitrate minimum (en Mbps)
 
 fail_count=0               # Compteur de pannes GS
-#auto=True 
 
-#txpowermax=2000 #for the moment is only for stock af1 without custom pa
-#txpower_index=300
-
-#soft tx power alg (sta)
-#will increase tx power at few db to get the link rock solid, is different to auto which will increase tx power at the maximum, here is just few db less or few db more around a base value 15db will become at max 17db for exemple and come to 15db after
-#for exemple it will increase of index 200 more and 200 down so max 17db is not exponantial
-
-
-
-# FONCTION : ping le GS et retourne le RTT max
 get_max_rtt() {
     output=$(ping -c 5 -W 1 "$ip_gs" 2>/dev/null)
 
@@ -44,10 +33,7 @@ get_dbm() {
     
 }
 
-#get_tx_power() {
-#    iw dev wlan0 info | grep 'txpower' | awk '{print $2}'
 
-#}
 
 get_dynamic_txpower_interval() {
     powertx=$(get_tx_power)
@@ -107,20 +93,16 @@ get_dynamic_decrease() {
     }')
 }
 
-#txpower_get=$(get_tx_power)
 # BOUCLE PRINCIPALE
 while true; do
     sleep 0.1
     
-    #init variable
 
     dbm=$(get_dbm)
     rtt=$(get_max_rtt)
-    interval=$(get_dynamic_intervals)
+    interval=$(get_dynamic_interval)
     decrease=$(get_dynamic_decrease)
     bitratemax=$(get_dynamic_max_bitrate)
-    #txpower_decrease=$(get_dynamic_txpower_decrease)
-    #txpower_increase=$(get_dynamic_txpower_interval)
     
 
     if [ $? -ne 0 ]; then
@@ -133,7 +115,7 @@ while true; do
     echo " Réponse GS — RTT max mesuré : $rtt ms"
 
     if [ "$dbm" -lt -80 ]; then
-        #iw wlan0 set txpower fixed $((txpower_get - txpower_index))
+
         bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
@@ -146,7 +128,7 @@ while true; do
         if [ "$bitrate" -ge "$bitratemax" ]; then
             echo "Bitrate max dynamique atteint : $bitrate Mbps (limite : $bitratemax Mbps)"
         else
-            #iw wlan0 set txpower fixed $((txpower_get - txpower_index))
+
             bitrate=$((bitrate + interval))
             
 
