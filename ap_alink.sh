@@ -71,17 +71,6 @@ get_dynamic_interval() {
     }')
 }
 
-get_dynamic_max_bitrate() {
-    dbm=$(get_dbm)
-    echo $(awk -v d="$dbm" 'BEGIN {
-        if (d > -40)      print 40;  
-        else if (d > -65) print 30;  
-        else if (d > -75) print 8;   
-        else if (d > -85) print 4;   
-        else              print 1;   
-    }')
-}
-
 
 get_dynamic_decrease() {
     dbm=$(get_dbm)
@@ -102,7 +91,6 @@ while true; do
     rtt=$(get_max_rtt)
     interval=$(get_dynamic_interval)
     decrease=$(get_dynamic_decrease)
-    bitratemax=$(get_dynamic_max_bitrate)
     
 
     if [ $? -ne 0 ]; then
