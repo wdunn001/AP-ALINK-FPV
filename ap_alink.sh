@@ -2,8 +2,8 @@
 
 # CONFIGURATION
 ip_gs="192.168.0.10"       # Adresse IP fixe du GS            
-bitrate=30               # Bitrate initial (en Mbps)
-bitratemax=40              # Bitrate maximum (en Mbps)
+bitrate=10               # Bitrate initial (en Mbps)
+bitratemax=14              # Bitrate maximum (en Mbps)
 bitratemin=0               # Bitrate minimum (en Mbps)
 
 fail_count=0               # Compteur de pannes GS
