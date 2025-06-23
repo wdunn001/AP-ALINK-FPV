@@ -100,21 +100,19 @@ while true; do
         continue
     fi
 
-    echo " Réponse GS — RTT max mesuré : $rtt ms"
-
-    if [ "$dbm" -lt -80 ]; then
+    if [ "$dbm" -lt -62 ]; then
 
         bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
-            
+            echo "Bitrate down to $bitrate Mbps (+$interval Mbps), current lq is $dbm"
         fi
         wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
         
         echo "Bitrate réduit à $bitrate Mbps, up txpower"
     else
         if [ "$bitrate" -ge "$bitratemax" ]; then
-            echo "Bitrate max dynamique atteint : $bitrate Mbps (limite : $bitratemax Mbps)"
+            echo "Bitrate max reach : $bitrate Mbps (max : $bitratemax Mbps), current lq is $dbm"
         else
 
             bitrate=$((bitrate + interval))
@@ -122,7 +120,7 @@ while true; do
 
             [ "$bitrate" -gt "$bitratemax" ] && bitrate=$bitratemax
             wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
-            echo "Bitrate augmenté à $bitrate Mbps (+$interval Mbps)"
+            echo "Bitrate up to $bitrate Mbps (+$interval Mbps), current lq is $dbm"
         fi
         
     fi
