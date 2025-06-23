@@ -1,10 +1,10 @@
 #!/bin/sh
 
 # CONFIGURATION
-ip_gs="192.168.0.10"       # ip of gs        
+ip_gs="192.168.0.10"       # Adresse IP fixe du GS            
 bitrate=10               # Bitrate initial (en Mbps)
 bitratemax=14              # Bitrate maximum (en Mbps)
-bitratemin=0               # Bitrate minimum (en Mbps)
+bitratemin=1               # Bitrate minimum (en Mbps)
 
 fail_count=0               # Compteur de pannes GS
 
@@ -75,10 +75,10 @@ get_dynamic_interval() {
 get_dynamic_decrease() {
     dbm=$(get_dbm)
     echo $(awk -v d="$dbm" 'BEGIN {
-        if (d > -60)      print 2;    
-        else if (d > -75) print 5;  
-        else if (d > -85) print 15;    
-        else              print 20;    
+        if (d > -61)      print 9;    
+        else if (d > -75) print 10;  
+        else if (d > -85) print 11;    
+        else              print 13;    
     }')
 }
 
