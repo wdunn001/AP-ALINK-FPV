@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # CONFIGURATION
-ip_gs="192.168.0.10"       # Adresse IP fixe du GS            
+ip_gs="192.168.0.10"       # ip of gs        
 bitrate=10               # Bitrate initial (en Mbps)
 bitratemax=14              # Bitrate maximum (en Mbps)
 bitratemin=0               # Bitrate minimum (en Mbps)
@@ -105,11 +105,11 @@ while true; do
         bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
             bitrate=$bitratemin
-            echo "Bitrate down to $bitrate Mbps (+$interval Mbps), current lq is $dbm"
+            
         fi
         wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
         
-        echo "Bitrate réduit à $bitrate Mbps, up txpower"
+        echo "Bitrate down to $bitrate Mbps (+$interval Mbps), current lq is $dbm"
     else
         if [ "$bitrate" -ge "$bitratemax" ]; then
             echo "Bitrate max reach : $bitrate Mbps (max : $bitratemax Mbps), current lq is $dbm"
