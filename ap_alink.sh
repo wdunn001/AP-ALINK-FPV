@@ -28,9 +28,9 @@ get_max_rtt() {
     echo "$max_rtt" 
     return 0
 }
+
 get_dbm() {
-    iw dev wlan0 station dump 2>/dev/null | grep 'signal:' | awk '{print $2}'
-    
+    iw dev wlan0 station dump 2>/dev/null | grep 'signal:' | awk '{print $2}' | sort -nr | head -n 1
 }
 
 
@@ -100,7 +100,7 @@ while true; do
         continue
     fi
 
-    if [ "$dbm" -lt -62 ]; then
+    if [ "$dbm" -lt -48 ]; then
 
         bitrate=$((bitrate - decrease))
         if [ "$bitrate" -lt "$bitratemin" ]; then
