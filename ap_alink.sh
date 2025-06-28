@@ -1,5 +1,5 @@
 #!/bin/sh
-
+#FALLBACK LOGIC
 # CONFIGURATION
 ip_gs="192.168.0.10"       # Adresse IP fixe du GS            
 bitrate=10                 # Bitrate initial (en Mbps)
