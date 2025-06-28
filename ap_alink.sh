@@ -2,9 +2,9 @@
 
 # CONFIGURATION
 ip_gs="192.168.0.10"       # Adresse IP fixe du GS            
-bitrate=10               # Bitrate initial (en Mbps)
-bitratemax=14              # Bitrate maximum (en Mbps)
-bitratemin=1               # Bitrate minimum (en Mbps)
+bitrate=10                 # Bitrate initial (en Mbps)
+bitratemax=25              # Bitrate maximum (en Mbps)
+bitratemin=2               # Bitrate minimum (en Mbps)
 
 fail_count=0               # Compteur de pannes GS
 
@@ -25,7 +25,7 @@ get_max_rtt() {
         fi
     done
 
-    echo "$max_rtt" 
+    echo "$max_rtt"
     return 0
 }
 
@@ -33,95 +33,29 @@ get_dbm() {
     iw dev wlan0 station dump 2>/dev/null | grep 'signal:' | awk '{print $2}' | sort -nr | head -n 1
 }
 
-
-
-get_dynamic_txpower_interval() {
-    powertx=$(get_tx_power)
-    echo $(awk -v d="$powertx" 'BEGIN {
-        if (d > -40)      print 100;
-        else if (d > -60) print 200;
-        else if (d > -75) print 300;
-        else if (d > -85) print 500;
-        else              print 700;
-    }')
-}
-
-
-
-get_dynamic_txpower_decrease() {
-    powertx=$(get_tx_power)
-    echo $(awk -v d="$powertx" 'BEGIN {
-        if (d > -40)      print 700;
-        else if (d > -60) print 400;
-        else if (d > -75) print 300;
-        else if (d > -85) print 200;
-        else              print 100;
-    }')
-}
-
-
-get_dynamic_interval() {
-    dbm=$(get_dbm)
-    echo $(awk -v d="$dbm" 'BEGIN {
-        if (d > -40)      print 13;
-        else if (d > -65) print 11;
-        else if (d > -75) print 10;
-        else if (d > -85) print 2;
-        else              print 1;
-    }')
-}
-
-
-get_dynamic_decrease() {
-    dbm=$(get_dbm)
-    echo $(awk -v d="$dbm" 'BEGIN {
-        if (d > -61)      print 9;    
-        else if (d > -75) print 10;  
-        else if (d > -85) print 11;    
-        else              print 13;    
-    }')
-}
-
 # BOUCLE PRINCIPALE
 while true; do
     sleep 0.1
-    
 
     dbm=$(get_dbm)
     rtt=$(get_max_rtt)
-    interval=$(get_dynamic_interval)
-    decrease=$(get_dynamic_decrease)
-    
 
     if [ $? -ne 0 ]; then
         fail_count=$((fail_count + 1))
         echo "[$fail_count] Le GS $ip_gs est injoignable"
-        echo " en attente de connexion"
+        echo "En attente de connexion..."
         continue
     fi
 
-    if [ "$dbm" -lt -48 ]; then
-
-        bitrate=$((bitrate - decrease))
-        if [ "$bitrate" -lt "$bitratemin" ]; then
-            bitrate=$bitratemin
-            
-        fi
-        wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
+    if [ "$dbm" -lt -50 ]; then
+        bitrate=$bitratemin
+        echo "Low signal fallback (dbm=$dbm), setting bitrate to $bitrate Mbps"
         
-        echo "Bitrate down to $bitrate Mbps (+$interval Mbps), current lq is $dbm"
-    else
-        if [ "$bitrate" -ge "$bitratemax" ]; then
-            echo "Bitrate max reach : $bitrate Mbps (max : $bitratemax Mbps), current lq is $dbm"
-        else
-
-            bitrate=$((bitrate + interval))
-            
-
-            [ "$bitrate" -gt "$bitratemax" ] && bitrate=$bitratemax
-            wget -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
-            echo "Bitrate up to $bitrate Mbps (+$interval Mbps), current lq is $dbm"
-        fi
-        
+    else 
+        bitrate=$bitratemax
+        echo "Signal OK (dbm=$dbm), setting bitrate to $bitrate Mbps"
     fi
+
+    # Set bitrate (convert Mbps to Kbps)
+    curl -q "http://localhost/api/v1/set?video0.bitrate=$((bitrate * 1024))"
 done
