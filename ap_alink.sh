@@ -1,11 +1,11 @@
 #!/bin/sh
 #FALLBACK LOGIC
 # CONFIGURATION
-ip_gs="192.168.0.10"       # Adresse IP fixe du GS            
-bitrate=10                 # Bitrate initial (en Mbps)
-bitratemax=25              # Bitrate maximum (en Mbps)
-bitratemin=2               # Bitrate minimum (en Mbps)
-
+ip_gs="192.168.0.10"       # Adresse IP fixe du GS
+bitrate=10
+bitratemax=25              # max bitrate
+bitratemin=2               # fallback bitrate
+dbm_threshold=-50 # dbm value threshold to trigger fallback
 fail_count=0               # Compteur de pannes GS
 
 get_max_rtt() {
@@ -47,7 +47,7 @@ while true; do
         continue
     fi
 
-    if [ "$dbm" -lt -50 ]; then
+    if [ "$dbm" -lt "$dbm_threshold" ]; then
         bitrate=$bitratemin
         echo "Low signal fallback (dbm=$dbm), setting bitrate to $bitrate Mbps"
         
