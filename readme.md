@@ -19,7 +19,7 @@ ACS script on kwad side SOON
 
 wifi card profile SOON
 
-msp osd Vlq indicator SOON 
+msp osd Vlq indicator DONE ( in progress )
 
 range / penetration test of wifililnk 2 : 
 
