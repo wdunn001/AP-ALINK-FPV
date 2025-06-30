@@ -21,6 +21,6 @@ wifi card profile SOON
 
 msp osd Vlq indicator DONE ( in progress )
 
-range / penetration test of wifililnk 2 : 
+range / penetration test of wifililnk 2 : https://www.youtube.com/watch?v=SV-0z6YXHIM
 
 range / penetrationt test of 8812 af1 ( emax wyverne link ) : 
