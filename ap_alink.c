@@ -117,10 +117,10 @@ void set_bitrate_async(int bitrate_mbps) {
 
     if (pthread_create(&thread_id, NULL, set_bitrate_thread, bitrate_kbps) == 0) {
         pthread_detach(thread_id); 
-    } else {
-        free(bitrate_kbps); 
+    } else { 
         perror("pthread_create");
     }
+    free(bitrate_kbps);
 }
 
 int main() {
