@@ -1,9 +1,10 @@
 Ap Alink
-How the script works
+How install
 
-Alink works by pinging the gs to 192.168.0.1, it takes the highest value, if this is > 50ms, the bitrate drops by interval (5) if smaller increases the bitrate, if the max bitrate is reached, no increase, if the min bitrate is reached no decrease.
+copy ap_alink to /usr/bin
+do in putty chmod +x /usr/bin/ap_alink
 
 in rc.local
 
-/etc/ap_alink.sh &
-exit0
+ap_alink &
+exit 0
