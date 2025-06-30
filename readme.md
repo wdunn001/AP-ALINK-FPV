@@ -10,3 +10,13 @@ ap_alink &
 exit 0
 
 only tested with af1 and eu2 card on ssc338q soc
+
+progress and new coming feature
+
+adaptive bitrate DONE
+
+ACS script on kwad side SOON
+
+wifi card profile SOON
+
+msp osd Vlq indicator SOON 
