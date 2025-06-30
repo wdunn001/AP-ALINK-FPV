@@ -20,3 +20,7 @@ ACS script on kwad side SOON
 wifi card profile SOON
 
 msp osd Vlq indicator SOON 
+
+range / penetration test of wifililnk 2 : 
+
+range / penetrationt test of 8812 af1 ( emax wyverne link ) : 
