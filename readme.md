@@ -17,9 +17,9 @@ adaptive bitrate DONE
 
 ACS script on kwad side SOON
 
-wifi card profile ( in progress )
+wifi card profile DONE
 
-msp osd Vlq indicator DONE ( in progress )
+msp osd Vlq indicator DONE
 
 range / penetration test of wifililnk 2 : https://www.youtube.com/watch?v=SV-0z6YXHIM
 
@@ -32,6 +32,8 @@ copy it in /etc/
 the stok setting is good for eu2
 for af1 card use this
 
-bitrate_max=22
+bitrate_max=12
 bitrate_min=2
 dbm_threshold=-47
+
+NOW include auto power fonction of iw for dynamic change of tx power, enable it with vtxmenu !
