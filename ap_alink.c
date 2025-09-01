@@ -7,13 +7,60 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define IP_GS "192.168.0.10"
-#define PING_CMD "ping -c 5 -W 1 " IP_GS
 
 
 void autopower() {
     system("iw wlan0 set tx power auto");
 }
+
+
+
+
+typedef struct {
+    int bitrateMcs;
+    char mcspath[256];
+} mcs_arg_t;
+
+void *set_mcs_thread(void *arg) {
+    mcs_arg_t *data = (mcs_arg_t *)arg;
+    int bitrateMcs = data->bitrateMcs;
+    char *mcspath = data->mcspath;
+    char cmd[512];
+    if (bitrateMcs >= 1 && bitrateMcs < 3) {
+        system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=30,0,0,30\" > /dev/null 2>&1");
+        snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
+        system(cmd);
+    }
+    else  {
+        system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=0,0,0,0\" > /dev/null 2>&1");
+        snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
+        system(cmd);
+    }
+
+    free(arg);
+    return NULL;
+}
+
+
+
+void set_mcs_async(int bitrateMcs, const char *mcspath) {
+    pthread_t thread_id;
+    mcs_arg_t *arg = malloc(sizeof(mcs_arg_t));
+    if (!arg) return;
+
+    arg->bitrateMcs = bitrateMcs;
+    snprintf(arg->mcspath, sizeof(arg->mcspath), "%s", mcspath);
+
+    if (pthread_create(&thread_id, NULL, set_mcs_thread, arg) == 0) {
+        pthread_detach(thread_id);
+    } else {
+        free(arg);
+    }
+}
+
+
+
+
 
 
 void config(const char *filename, int *BITRATE_MAX, int *BITRATE_MIN, int *DBM_MAX, int *DBM_MIN, int *auto_power, char *WIFICARD, int *ACS, int *MCS, int *RACE) {
@@ -210,30 +257,6 @@ int get_rssi(const char *readcmd) {
 
 
 
-int get_max_rtt() {
-    FILE *fp;
-    char line[256];
-    float max_rtt = 0.0;
-    fp = popen(PING_CMD, "r");
-    if (fp == NULL) {
-        perror("error ping");
-        return -1;
-    }
-
-    while (fgets(line, sizeof(line), fp)) {
-        float rtt;
-        if (strstr(line, "time=")) {
-            if (sscanf(line, "%*[^=]=%f", &rtt) == 1) {
-                if (rtt > max_rtt) {
-                    max_rtt = rtt;
-                }
-            }
-        }
-    }
-    pclose(fp);
-    return (int)max_rtt;
-}
-
 void mspLQ(int rssi_osd) {
     char command[128];
     snprintf(command, sizeof(command),
@@ -285,7 +308,11 @@ int main() {
     char driverpath[256] = {0};
     int MCS = 0;
     int RaceMode = 0;
-  
+    int histeris = 3;
+    int minushisteris = -3;
+    int aDb = 0;
+    int currentDb = 0;
+    int dbm = -100;
     config("/etc/ap_alink.conf", &bitrate_max, &bitrate_min, &dbm_Max, &dbm_Min, &autopw, NIC, &Acs, &MCS, &RaceMode);
     
 
@@ -329,62 +356,50 @@ int main() {
 
         
     }
-
-    while (1) {
- 
-        int rtt = get_max_rtt();
-        int dbm = get_dbm();
-        int rssi = get_rssi(driverpath);
     
-        if (rtt == -1) {
-            fail_count++;
-            printf("[%d] GS %s unreachable\n", fail_count, IP_GS);
-            fflush(stdout);
-            printf("wait for connect\n");
-            fflush(stdout);
-            continue;
-        }
+    while (1) {
+        currentDb = dbm - aDb;
+        int dbm = get_dbm();
+        aDb = dbm; 
+        int rssi = get_rssi(driverpath);
         
+
         double vlq = ((double)((dbm) - (dbm_Min)) / (double)((dbm_Max) - (dbm_Min))) * 100.0;
       
         printf("vlq = %.2f%%\n", vlq);
         printf("rssi = %d\n", rssi);
+        printf("adb= %d\n", aDb);
+        printf("dbm= %d\n", dbm);
+        printf("current %d\n", currentDb);
         mspLQ(rssi);
+        
         // RSSI fallback
             // Clamp VLQ between 0 and 100
-            if (vlq > 100.0) {
+            if ( currentDb > histeris || currentDb < minushisteris ) {
+                if (vlq > 100.0 || rssi > 55) {
                 bitrate = bitrate_max;
-                if (MCS == 1) {
-                char cmd[512];
-                snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", driverpath);
-                system(cmd);
-                } 
-            } else if (vlq < 14.0 || rssi < 30) {
-                bitrate = bitrate_min;
-               if (MCS == 1) {
-                char cmd[512];
-                snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", driverpath);
-                system(cmd);
-                } 
-            } else {
-                bitrate = (int)(bitrate_max * vlq / 100.0);
-                char cmd[512];
-                snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", driverpath);
-                system(cmd);
             }
+            else if (vlq < 1 || rssi < 20) {
+                bitrate = bitrate_min;
+            }
+             else {
+                bitrate = (int)(bitrate_max * vlq / 100.0);
+            
+            }
+                set_bitrate_async(bitrate);
+        }       set_mcs_async(bitrate, driverpath);
         
 
-         
-        printf("dbm=%d, vlq=%.2f%%, bitrate=%d Mbps, rtt=%d\n", dbm, vlq, bitrate, rtt);
+
+
 
         fflush(stdout);
-        set_bitrate_async(bitrate);
 
+
+        
         
     }
 
     return 0;
 
 }
-
-
