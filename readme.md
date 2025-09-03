@@ -6,3 +6,5 @@ This fw is ready to flash and pnp no extra setup needed
 The code is completly free to use for everyone
 
 In openipc ecosystem, apfpv ap alink solve all wfb ng issue, include lack of intuitive ui, latency, stutter. Made the perfect choice for use openipc related hw and get the best performance of it
+
+Irl test : https://youtu.be/MFqh6s7O_1k
