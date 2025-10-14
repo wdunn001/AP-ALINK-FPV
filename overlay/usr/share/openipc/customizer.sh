@@ -5,7 +5,7 @@ cli -s .video0.fps 90
 cli -s .video0.size 1920x1080
 cli -s .video0.bitrate 12000
 cli -s .video0.codec h265
-cli -s .video0.rcMode cbr
+cli -s .video0.rcMode vbr
 cli -s .video0.qpDelta -12
 cli -s .video0.gopSize 1
 cli -s .video1.enabled false
