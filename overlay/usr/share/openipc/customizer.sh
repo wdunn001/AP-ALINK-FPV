@@ -15,7 +15,7 @@ cli -s .video1.codec h265
 cli -s .video1.size 1920x1080
 cli -s .outgoing.enabled true
 cli -s .outgoing.server udp://224.0.0.1:5600
-cli -s .outgoing.naluSize 1200
+cli -s .outgoing.naluSize 1400
 cli -s .records.split 1200
 cli -s .records.notime true
 cli -s .records.enabled false
