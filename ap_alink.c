@@ -249,8 +249,20 @@ int main() {
         printf("RACEMODE ENABLE");
         char cmd1[512];
         snprintf(cmd1, sizeof(cmd1), "echo 20 > %s/ack_timeout", driverpath);
-
-
+        //SET BITRATE MAX 4MBPS
+        bitrate_max=4;
+        //SET BUFFER SETTING
+        system("sysctl -w net.core.rmem_default=16384");
+        system("sysctl -w net.core.rmem_max=65536");
+        system("sysctl -w net.core.wmem_default=16384");
+        system("sysctl -w net.core.wmem_max=65536");
+        system("ifconfig wlan0 txqueuelen 100");
+        system("sysctl -w net.core.netdev_max_backlog=64");
+        //SET 960x720120FPS
+        system("wget -qO- \"http://localhost/api/v1/set?video0.size=1280x720\" > /dev/null 2>&1");
+        system("wget -qO- \"http://localhost/api/v1/set?video0.fps=120\" > /dev/null 2>&1");
+        system("wget -qO- \"http://localhost/api/v1/set?isp.exposure=11\" > /dev/null 2>&1");                
+        
     } else {
         printf("racemode disable\n");
 
@@ -328,3 +340,4 @@ int main() {
     return 0;
 
 }
+
