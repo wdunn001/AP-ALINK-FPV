@@ -138,6 +138,49 @@ void reset_filter_chain(filter_chain_t *chain);
 int get_dynamic_rssi_threshold(int current_mcs);
 int bitrate_to_mcs(int bitrate_mbps);
 
+// Generic popen() helper function to replace system() calls
+int execute_command(const char *command) {
+    // validate input parameters
+    if (command == NULL) {
+#ifdef DEBUG
+        fprintf(stderr, "Error: execute_command() called with NULL command\n");
+#endif
+        return -1;
+    }
+    
+    if (strlen(command) == 0) {
+#ifdef DEBUG
+        fprintf(stderr, "Error: execute_command() called with empty command\n");
+#endif
+        return -1;
+    }
+    
+    if (strlen(command) > 1024) {
+#ifdef DEBUG
+        fprintf(stderr, "Error: execute_command() command too long (>1024 chars)\n");
+#endif
+        return -1;
+    }
+    
+    FILE *pipe = popen(command, "w");
+    if (pipe == NULL) {
+#ifdef DEBUG
+        perror("popen failed");
+#endif
+        return -1;
+    }
+    
+    int status = pclose(pipe);
+    if (status == -1) {
+#ifdef DEBUG
+        perror("pclose failed");
+#endif
+        return -1;
+    }
+    // Return the exit status of the command
+    return WEXITSTATUS(status);
+}
+
 // Global Kalman filters for different signals
 static kalman_filter_t rssi_filter = {
     .estimate = 50.0f,           // Initial RSSI estimate (50%)
@@ -856,7 +899,10 @@ void check_emergency_drop(int current_bitrate, float filtered_rssi,
         // Set emergency bitrate
         char command[128];
         snprintf(command, sizeof(command), "wfb_tx_cmd 8000 set_bitrate %d", emergency_bitrate);
-        system(command);
+        int result = execute_command(command);
+        if (result != 0) {
+            printf("Warning: Emergency bitrate command failed with status %d\n", result);
+        }
         
         // Update timing variables
         unsigned long now = get_current_time_ms();
@@ -871,7 +917,10 @@ void check_emergency_drop(int current_bitrate, float filtered_rssi,
 }
 
 void autopower() {
-    (void)system("iw wlan0 set tx power auto");
+    int result = execute_command("iw wlan0 set tx power auto");
+    if (result != 0) {
+        printf("Warning: WiFi power control command failed with status %d\n", result);
+    }
 }
 
 // Set real-time priority for ultra-high performance racing VTX
@@ -1059,7 +1108,10 @@ void *worker_thread_func(void *arg) {
                              global_qp_delta_low, global_qp_delta_low);
                     http_get(qp_path);
                     snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
-                    (void)system(cmd);
+                    int result = execute_command(cmd);
+                    if (result != 0) {
+                        printf("Warning: MCS rate control (low) command failed with status %d\n", result);
+                    }
                 }
                 else if (bitrateMcs >= 3 && bitrateMcs < 10) {
                     char qp_path[128];
@@ -1067,7 +1119,10 @@ void *worker_thread_func(void *arg) {
                              global_qp_delta_medium, global_qp_delta_medium);
                     http_get(qp_path);
                     snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
-                    (void)system(cmd);
+                    int result = execute_command(cmd);
+                    if (result != 0) {
+                        printf("Warning: MCS rate control (medium) command failed with status %d\n", result);
+                    }
                 }
                 else {
                     char qp_path[128];
@@ -1075,7 +1130,10 @@ void *worker_thread_func(void *arg) {
                              global_qp_delta_high, global_qp_delta_high);
                     http_get(qp_path);
                     snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
-                    (void)system(cmd);
+                    int result = execute_command(cmd);
+                    if (result != 0) {
+                        printf("Warning: MCS rate control (high) command failed with status %d\n", result);
+                    }
                 }
                 break;
             }
@@ -1416,7 +1474,10 @@ void mspLQ(int rssi_osd) {
              "echo \"VLQ %d &B &F60 &L30\" > /tmp/MSPOSD.msg",
               rssi_osd);
               //RSSI PATTERN *** ** * 
-    (void)system(command);
+    int result = execute_command(command);
+    if (result != 0) {
+        printf("Warning: MSP OSD command failed with status %d\n", result);
+    }
 }
 
 
@@ -1600,12 +1661,17 @@ int main() {
         //SET BITRATE MAX 4MBPS
         bitrate_max=4;
         //SET BUFFER SETTING
-        (void)system("sysctl -w net.core.rmem_default=16384");
-        (void)system("sysctl -w net.core.rmem_max=65536");
-        (void)system("sysctl -w net.core.wmem_default=16384");
-        (void)system("sysctl -w net.core.wmem_max=65536");
-        (void)system("ifconfig wlan0 txqueuelen 100");
-        (void)system("sysctl -w net.core.netdev_max_backlog=64");
+        int result1 = execute_command("sysctl -w net.core.rmem_default=16384");
+        int result2 = execute_command("sysctl -w net.core.rmem_max=65536");
+        int result3 = execute_command("sysctl -w net.core.wmem_default=16384");
+        int result4 = execute_command("sysctl -w net.core.wmem_max=65536");
+        int result5 = execute_command("ifconfig wlan0 txqueuelen 100");
+        int result6 = execute_command("sysctl -w net.core.netdev_max_backlog=64");
+        
+        // Check if any network configuration commands failed
+        if (result1 != 0 || result2 != 0 || result3 != 0 || result4 != 0 || result5 != 0 || result6 != 0) {
+            printf("Warning: Some network buffer configuration commands failed\n");
+        }
         //SET racing video configuration with optimized HTTP calls
         char video_config[256];
         snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.size=%s", racing_video_resolution);
