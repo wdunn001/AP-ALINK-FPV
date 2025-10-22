@@ -11,8 +11,65 @@
 #include <arpa/inet.h>
 #include <sys/time.h>
 #include <sched.h>
+#include <math.h>
 
+// Kalman Filter Structure
+typedef struct {
+    float estimate;           // Current estimate
+    float error_estimate;     // Current error estimate
+    float process_variance;   // Process noise variance
+    float measurement_variance; // Measurement noise variance
+} kalman_filter_t;
 
+// Global Kalman filters for different signals
+static kalman_filter_t rssi_filter = {
+    .estimate = 50.0f,           // Initial RSSI estimate (50%)
+    .error_estimate = 1.0f,      // Initial error estimate
+    .process_variance = 1e-5f,   // Process noise (small for stable signals)
+    .measurement_variance = 0.1f  // Measurement noise
+};
+
+static kalman_filter_t dbm_filter = {
+    .estimate = -60.0f,          // Initial dBm estimate
+    .error_estimate = 1.0f,      // Initial error estimate
+    .process_variance = 1e-5f,   // Process noise
+    .measurement_variance = 0.5f  // Measurement noise (higher for dBm)
+};
+
+// Kalman filter update function
+float kalman_filter_update(kalman_filter_t *filter, float measurement) {
+    // Prediction step
+    float predicted_estimate = filter->estimate;
+    float predicted_error = filter->error_estimate + filter->process_variance;
+    
+    // Update step
+    float kalman_gain = predicted_error / (predicted_error + filter->measurement_variance);
+    filter->estimate = predicted_estimate + kalman_gain * (measurement - predicted_estimate);
+    filter->error_estimate = (1 - kalman_gain) * predicted_error;
+    
+    return filter->estimate;
+}
+
+// Initialize Kalman filters with custom parameters
+void init_kalman_filters(float rssi_process_var, float rssi_measure_var,
+                        float dbm_process_var, float dbm_measure_var) {
+    rssi_filter.process_variance = rssi_process_var;
+    rssi_filter.measurement_variance = rssi_measure_var;
+    
+    dbm_filter.process_variance = dbm_process_var;
+    dbm_filter.measurement_variance = dbm_measure_var;
+}
+
+// Reset Kalman filters to initial state
+void reset_kalman_filters() {
+    rssi_filter.estimate = 50.0f;
+    rssi_filter.error_estimate = 1.0f;
+    
+    dbm_filter.estimate = -60.0f;
+    dbm_filter.error_estimate = 1.0f;
+    
+    printf("Kalman filters reset to initial state\n");
+}
 
 void autopower() {
     (void)system("iw wlan0 set tx power auto");
@@ -198,7 +255,9 @@ void set_mcs_async(int bitrateMcs, const char *mcspath) {
 
 
 
-void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, int *FPS) {
+void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, int *FPS,
+            float *rssi_process_var, float *rssi_measure_var, 
+            float *dbm_process_var, float *dbm_measure_var) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -219,6 +278,18 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         }
         else if (strncmp(line, "fps=", 4) == 0) {
             sscanf(line + 4, "%d", FPS);
+        }
+        else if (strncmp(line, "kalman_rssi_process=", 20) == 0) {
+            sscanf(line + 20, "%f", rssi_process_var);
+        }
+        else if (strncmp(line, "kalman_rssi_measure=", 20) == 0) {
+            sscanf(line + 20, "%f", rssi_measure_var);
+        }
+        else if (strncmp(line, "kalman_dbm_process=", 19) == 0) {
+            sscanf(line + 19, "%f", dbm_process_var);
+        }
+        else if (strncmp(line, "kalman_dbm_measure=", 19) == 0) {
+            sscanf(line + 19, "%f", dbm_measure_var);
         }
     }
 
@@ -351,9 +422,24 @@ int main() {
     int dbm = -100;
     int loop_counter = 0;  // Counter to reduce I/O frequency
     int target_fps = 120;  // Default racing frame rate
+    
+    // Kalman filter parameters
+    float rssi_process_var = 1e-5f;   // Default process variance for RSSI
+    float rssi_measure_var = 0.1f;    // Default measurement variance for RSSI
+    float dbm_process_var = 1e-5f;    // Default process variance for dBm
+    float dbm_measure_var = 0.5f;     // Default measurement variance for dBm
+    
+    // Filtered values
+    float filtered_rssi = 50.0f;
+    float filtered_dbm = -60.0f;
+    
     //char rssi_pattern[5] = {0};
 
-    config("/etc/ap_alink.conf", &bitrate_max, NIC, &RaceMode, &target_fps);
+    config("/etc/ap_alink.conf", &bitrate_max, NIC, &RaceMode, &target_fps,
+           &rssi_process_var, &rssi_measure_var, &dbm_process_var, &dbm_measure_var);
+    
+    // Initialize Kalman filters with config values
+    init_kalman_filters(rssi_process_var, rssi_measure_var, dbm_process_var, dbm_measure_var);
     
     // Set real-time priority for ultra-high performance racing VTX
     set_realtime_priority();
@@ -421,28 +507,32 @@ int main() {
             dbm = get_dbm();
             aDb = dbm; 
             rssi = get_rssi(driverpath);
+            
+            // Apply Kalman filtering to smooth the signals
+            filtered_rssi = kalman_filter_update(&rssi_filter, (float)rssi);
+            filtered_dbm = kalman_filter_update(&dbm_filter, (float)dbm);
         }
         
         //calculation of dbm_Max dbm_Min
         
 
         dbm_Max = -50;      
-        dbm_Min = (rssi > 55) ? -70 : (rssi >= 40 ? -55 : -53);
+        dbm_Min = (filtered_rssi > 55) ? -70 : (filtered_rssi >= 40 ? -55 : -53);
 
 
-        double vlq = ((double)((dbm) - (dbm_Min)) / (double)((dbm_Max) - (dbm_Min))) * 100.0;
+        double vlq = ((double)((filtered_dbm) - (dbm_Min)) / (double)((dbm_Max) - (dbm_Min))) * 100.0;
       
 #ifdef DEBUG
         // Only show debug output when we read new signal data
         if (loop_counter % 5 == 0) {
             printf("vlq = %.2f%%\n", vlq);
-            printf("rssi = %d\n", rssi);
+            printf("rssi = %d (filtered: %.1f)\n", rssi, filtered_rssi);
             printf("adb= %d\n", aDb);
-            printf("dbm= %d\n", dbm);
+            printf("dbm= %d (filtered: %.1f)\n", dbm, filtered_dbm);
             printf("current %d\n", currentDb);
         }
 #endif
-        mspLQ(rssi);
+        mspLQ((int)filtered_rssi);
 
              
         
