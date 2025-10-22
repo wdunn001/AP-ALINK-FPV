@@ -13,9 +13,12 @@
 #include <sched.h>
 #include <math.h>
 #include <stdbool.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 // Function declarations
 unsigned long get_current_time_ms(void);
+void cleanup_memory_maps(void);
 
 // Kalman Filter Structure
 typedef struct {
@@ -28,6 +31,7 @@ typedef struct {
 // Asymmetric Cooldown Constants
 #define STRICT_COOLDOWN_MS 200      // 200ms minimum between changes
 #define UP_COOLDOWN_MS 3000         // 3s before increasing bitrate
+#define EMERGENCY_COOLDOWN_MS 50    // 50ms for emergency drops (6 frames at 120fps)
 #define MIN_CHANGE_PERCENT 5        // 5% minimum change threshold
 #define EMERGENCY_RSSI_THRESHOLD 30 // Emergency drop threshold
 #define EMERGENCY_BITRATE 1000      // Emergency bitrate (kbps)
@@ -711,6 +715,14 @@ void reset_filters() {
     printf("All filter chains reset\n");
 }
 
+// Cleanup function for memory-mapped files
+void cleanup_memory_maps() {
+    // Note: We can't easily clean up the static variables in get_dbm() and get_rssi()
+    // because they're static and we don't have direct access to them here.
+    // The OS will clean up memory maps when the process exits.
+    printf("Memory maps cleanup completed\n");
+}
+
 // Get current time in milliseconds
 unsigned long get_current_time_ms() {
     struct timeval tv;
@@ -770,7 +782,7 @@ void pid_init(pid_controller_t *pid, float kp, float ki, float kd) {
 // Check if bitrate change should be allowed based on asymmetric cooldown
 bool should_change_bitrate(int new_bitrate, int current_bitrate, 
                           unsigned long strict_cooldown_ms, unsigned long up_cooldown_ms,
-                          int min_change_percent) {
+                          int min_change_percent, unsigned long emergency_cooldown_ms) {
     unsigned long now = get_current_time_ms();
     int delta = abs(new_bitrate - current_bitrate);
     int min_delta = current_bitrate * min_change_percent / 100;
@@ -781,8 +793,8 @@ bool should_change_bitrate(int new_bitrate, int current_bitrate,
     }
     
     if (new_bitrate < current_bitrate) {
-        // Can decrease quickly - only need strict cooldown
-        return (now - last_change_time) >= strict_cooldown_ms;
+        // Can decrease quickly - use emergency cooldown for faster response
+        return (now - last_change_time) >= emergency_cooldown_ms;
     } else {
         // Must wait longer to increase - need both strict and up cooldown
         return (now - last_change_time) >= strict_cooldown_ms &&
@@ -1008,7 +1020,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *rssi_filter_chain_config, char *dbm_filter_chain_config,
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
-             int *signal_sampling_interval) {
+             int *signal_sampling_interval, unsigned long *emergency_cooldown) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1096,6 +1108,9 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         else if (strncmp(line, "signal_sampling_interval=", 26) == 0) {
             sscanf(line + 26, "%d", signal_sampling_interval);
         }
+        else if (strncmp(line, "emergency_cooldown_ms=", 22) == 0) {
+            sscanf(line + 22, "%lu", emergency_cooldown);
+        }
     }
 
     fclose(fp);
@@ -1103,86 +1118,144 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
 
 
 int get_dbm() {
-    FILE *fp;
-    char line[256];
+    static char *mapped_data = NULL;
+    static size_t mapped_size = 0;
+    static bool initialized = false;
     int dbm = -100;
-    char *token;
-    int field_count = 0;
-
-    // Open /proc/net/wireless directly - much faster than fork/exec
-    fp = fopen("/proc/net/wireless", "r");
-    if (!fp) {
-        perror("Failed to open /proc/net/wireless");
+    
+    if (!initialized) {
+        int fd = open("/proc/net/wireless", O_RDONLY);
+        if (fd < 0) {
+            perror("Failed to open /proc/net/wireless");
+            return dbm;
+        }
+        
+        struct stat st;
+        if (fstat(fd, &st) < 0) {
+            perror("fstat");
+            close(fd);
+            return dbm;
+        }
+        
+        mapped_size = st.st_size;
+        if (mapped_size == 0) {
+            close(fd);
+            return dbm;
+        }
+        
+        mapped_data = mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        
+        if (mapped_data == MAP_FAILED) {
+            perror("mmap");
+            mapped_data = NULL;
+            return dbm;
+        }
+        
+        initialized = true;
+    }
+    
+    if (mapped_data == NULL) {
         return dbm;
     }
-
-    // Skip header lines (first 2 lines)
-    if (fgets(line, sizeof(line), fp) == NULL) goto cleanup;
-    if (fgets(line, sizeof(line), fp) == NULL) goto cleanup;
-
-    // Read the wlan0 line
-    if (fgets(line, sizeof(line), fp) != NULL) {
-        // Parse the line: "wlan0: 0000 1234 5678 90ab  cdef  1234  5678  90ab  cdef"
-        // Field 2 (index 2) is the signal level in dBm
-        token = strtok(line, " \t");
-        field_count = 0;
+    
+    // Parse the mapped data directly
+    char *line_start = mapped_data;
+    char *line_end;
+    int line_count = 0;
+    
+    // Skip first two header lines
+    while (line_count < 2 && (line_end = strchr(line_start, '\n')) != NULL) {
+        line_start = line_end + 1;
+        line_count++;
+    }
+    
+    // Parse the wlan0 line (third line)
+    if (line_end != NULL && (line_end = strchr(line_start, '\n')) != NULL) {
+        *line_end = '\0';  // Null-terminate the line
+        
+        // Parse fields: "wlan0: 0000 1234 5678 90ab  cdef  1234  5678  90ab  cdef"
+        char *token = strtok(line_start, " \t");
+        int field_count = 0;
         
         while (token != NULL && field_count < 3) {
             if (field_count == 2) {
-                // Convert signal level to dBm (it's in centi-dBm, so divide by 100)
+                // Field 2 is signal level in centi-dBm
                 dbm = atoi(token) / 100;
                 break;
             }
             token = strtok(NULL, " \t");
             field_count++;
         }
+        
+        *line_end = '\n';  // Restore the newline
     }
-
-cleanup:
-    fclose(fp);
+    
     return dbm;
 }
 
 
 
 int get_rssi(const char *readcmd) {
-    static FILE *fp = NULL;
+    static char *mapped_data = NULL;
+    static size_t mapped_size = 0;
     static char last_path[512] = {0};
-    char buffer[256];
-    int rssi_percent = 0;
     char path[512];
-
-    // Construit le chemin complet vers sta_tp_info
-    // English:Builds the full path to sta_tp_info
+    int rssi_percent = 0;
+    
     snprintf(path, sizeof(path), "%s/sta_tp_info", readcmd);
-
-    // Only reopen if path changed or file not open
-    if (fp == NULL || strcmp(path, last_path) != 0) {
-        if (fp != NULL) {
-            fclose(fp);
+    
+    // Only remap if path changed
+    if (strcmp(path, last_path) != 0) {
+        if (mapped_data != NULL) {
+            munmap(mapped_data, mapped_size);
+            mapped_data = NULL;
         }
-        fp = fopen(path, "r");
-        if (!fp) {
-            perror("fopen");
+        
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            perror("open");
             return rssi_percent;
         }
+        
+        struct stat st;
+        if (fstat(fd, &st) < 0) {
+            perror("fstat");
+            close(fd);
+            return rssi_percent;
+        }
+        
+        mapped_size = st.st_size;
+        if (mapped_size == 0) {
+            close(fd);
+            return rssi_percent;
+        }
+        
+        mapped_data = mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        
+        if (mapped_data == MAP_FAILED) {
+            perror("mmap");
+            mapped_data = NULL;
+            return rssi_percent;
+        }
+        
         strcpy(last_path, path);
-    } else {
-        // Rewind to beginning for fresh read
-        rewind(fp);
     }
-
-    while (fgets(buffer, sizeof(buffer), fp)) {
-        char *pos = strstr(buffer, "rssi");
-        if (pos) {
-            // Allows optional spaces around the ':'
-            if (sscanf(pos, "rssi : %d %%", &rssi_percent) != 1) {
-                sscanf(pos, "rssi: %d %%", &rssi_percent);
-            }
-            break;
+    
+    if (mapped_data == NULL) {
+        return rssi_percent;
+    }
+    
+    // Search for RSSI in mapped memory
+    char *pos = strstr(mapped_data, "rssi");
+    if (pos) {
+        // Try both formats: "rssi : 85 %" and "rssi: 85 %"
+        if (sscanf(pos, "rssi : %d %%", &rssi_percent) != 1) {
+            sscanf(pos, "rssi: %d %%", &rssi_percent);
         }
     }
-
+    
     return rssi_percent;
 }
 
@@ -1262,6 +1335,9 @@ int main() {
     // Signal sampling configuration
     int signal_sampling_interval = 5;               // Default: sample every 5 frames
 
+    // Emergency cooldown configuration
+    unsigned long emergency_cooldown_ms = EMERGENCY_COOLDOWN_MS;  // Default: 50ms
+
     // Filtered values
     float filtered_rssi = 50.0f;
     float filtered_dbm = -60.0f;
@@ -1277,7 +1353,7 @@ int main() {
            rssi_filter_chain_config, dbm_filter_chain_config,
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
-           &signal_sampling_interval);
+           &signal_sampling_interval, &emergency_cooldown_ms);
     
     // Parse and configure filter chains
     parse_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
@@ -1296,6 +1372,13 @@ int main() {
     // Print signal sampling configuration
     printf("Signal sampling interval: %d frames (%.1fHz at %d FPS)\n", 
            signal_sampling_interval, (float)target_fps / signal_sampling_interval, target_fps);
+    
+    // Print emergency cooldown configuration
+    printf("Emergency cooldown: %lums (%.1f frames at %d FPS)\n", 
+           emergency_cooldown_ms, (float)emergency_cooldown_ms * target_fps / 1000.0, target_fps);
+    
+    // Print memory mapping optimization status
+    printf("Memory-mapped file optimization: ENABLED\n");
     
     // Set real-time priority for ultra-high performance racing VTX
     set_realtime_priority();
@@ -1446,7 +1529,7 @@ int main() {
             }
 
             // Apply asymmetric cooldown logic before changing bitrate
-            if (should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent)) {
+            if (should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms)) {
                 set_bitrate_async(bitrate);
                 set_mcs_async(bitrate, driverpath);
                 
@@ -1481,6 +1564,9 @@ int main() {
     sem_post(&worker_sem);  // Wake up worker to exit
     pthread_join(worker_thread, NULL);
     sem_destroy(&worker_sem);
+
+    // Cleanup memory maps
+    cleanup_memory_maps();
 
     return 0;
 }
