@@ -179,19 +179,32 @@ cleanup:
 
 
 int get_rssi(const char *readcmd) {
-    FILE *fp;
+    static FILE *fp = NULL;
+    static char last_path[512] = {0};
     char buffer[256];
     int rssi_percent = 0;
     char path[512];
 
     // Construit le chemin complet vers sta_tp_info
+    // English:Builds the full path to sta_tp_info
     snprintf(path, sizeof(path), "%s/sta_tp_info", readcmd);
 
-    fp = fopen(path, "r");
-    if (!fp) {
-        perror("fopen");
-        return rssi_percent;
+    // Only reopen if path changed or file not open
+    if (fp == NULL || strcmp(path, last_path) != 0) {
+        if (fp != NULL) {
+            fclose(fp);
+        }
+        fp = fopen(path, "r");
+        if (!fp) {
+            perror("fopen");
+            return rssi_percent;
+        }
+        strcpy(last_path, path);
+    } else {
+        // Rewind to beginning for fresh read
+        rewind(fp);
     }
+
     while (fgets(buffer, sizeof(buffer), fp)) {
         char *pos = strstr(buffer, "rssi");
         if (pos) {
@@ -203,7 +216,6 @@ int get_rssi(const char *readcmd) {
         }
     }
 
-    fclose(fp);
     return rssi_percent;
 }
 
