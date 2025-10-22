@@ -5,7 +5,6 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 
 
 
@@ -95,50 +94,43 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE) {
 
 
 int get_dbm() {
-    int pipefd[2];
-    pid_t pid;
-    char buffer[256];
+    FILE *fp;
+    char line[256];
     int dbm = -100;
+    char *token;
+    int field_count = 0;
 
-    if (pipe(pipefd) == -1) {
-        perror("pipe");
+    // Open /proc/net/wireless directly - much faster than fork/exec
+    fp = fopen("/proc/net/wireless", "r");
+    if (!fp) {
+        perror("Failed to open /proc/net/wireless");
         return dbm;
     }
 
-    if ((pid = fork()) == -1) {
-        perror("fork");
-        return dbm;
-    }
+    // Skip header lines (first 2 lines)
+    if (fgets(line, sizeof(line), fp) == NULL) goto cleanup;
+    if (fgets(line, sizeof(line), fp) == NULL) goto cleanup;
 
-    if (pid == 0) { // Child
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[1]);
-        execlp("iw", "iw", "dev", "wlan0", "station", "dump", NULL);
-        perror("execlp failed");
-        exit(1);
-    } else { // Parent
-        close(pipefd[1]);
-        FILE *fp = fdopen(pipefd[0], "r");
-        if (!fp) {
-            perror("fdopen failed");
-            close(pipefd[0]);
-            waitpid(pid, NULL, 0);
-            return dbm;
-        }
-        while (fgets(buffer, sizeof(buffer), fp)) {
-            // Exemple typique: "signal: -42 dBm"
-            if (strstr(buffer, "signal:")) {
-                int temp;
-                if (sscanf(buffer, " signal: %d dBm", &temp) == 1) {
-                    dbm = temp;
-                    break;
-                }
+    // Read the wlan0 line
+    if (fgets(line, sizeof(line), fp) != NULL) {
+        // Parse the line: "wlan0: 0000 1234 5678 90ab  cdef  1234  5678  90ab  cdef"
+        // Field 2 (index 2) is the signal level in dBm
+        token = strtok(line, " \t");
+        field_count = 0;
+        
+        while (token != NULL && field_count < 3) {
+            if (field_count == 2) {
+                // Convert signal level to dBm (it's in centi-dBm, so divide by 100)
+                dbm = atoi(token) / 100;
+                break;
             }
+            token = strtok(NULL, " \t");
+            field_count++;
         }
-        fclose(fp);
-        waitpid(pid, NULL, 0);
     }
+
+cleanup:
+    fclose(fp);
     return dbm;
 }
 
@@ -271,9 +263,9 @@ int main() {
     
     while (1) {
         currentDb = dbm - aDb;
-        int dbm = get_dbm();
+        dbm = get_dbm();
         aDb = dbm; 
-        int rssi = get_rssi(driverpath);
+        rssi = get_rssi(driverpath);
         
         //calculation of dbm_Max dbm_Min
         
