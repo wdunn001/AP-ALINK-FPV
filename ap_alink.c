@@ -1007,7 +1007,8 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              float *lpf_cutoff_freq, float *lpf_sample_freq,
              char *rssi_filter_chain_config, char *dbm_filter_chain_config,
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
-             char *racing_video_resolution, int *racing_exposure, int *racing_fps) {
+             char *racing_video_resolution, int *racing_exposure, int *racing_fps,
+             int *signal_sampling_interval) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1091,6 +1092,9 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         }
         else if (strncmp(line, "lpf_sample_freq=", 16) == 0) {
             sscanf(line + 16, "%f", lpf_sample_freq);
+        }
+        else if (strncmp(line, "signal_sampling_interval=", 26) == 0) {
+            sscanf(line + 26, "%d", signal_sampling_interval);
         }
     }
 
@@ -1255,6 +1259,9 @@ int main() {
     int racing_exposure = 11;                       // Default racing exposure
     int racing_fps = 120;                           // Default racing frame rate
 
+    // Signal sampling configuration
+    int signal_sampling_interval = 5;               // Default: sample every 5 frames
+
     // Filtered values
     float filtered_rssi = 50.0f;
     float filtered_dbm = -60.0f;
@@ -1269,7 +1276,8 @@ int main() {
            &lpf_cutoff_freq, &lpf_sample_freq,
            rssi_filter_chain_config, dbm_filter_chain_config,
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
-           racing_video_resolution, &racing_exposure, &racing_fps);
+           racing_video_resolution, &racing_exposure, &racing_fps,
+           &signal_sampling_interval);
     
     // Parse and configure filter chains
     parse_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
@@ -1284,6 +1292,10 @@ int main() {
     // Initialize PID controller with config values
     pid_init(&bitrate_pid, pid_kp, pid_ki, pid_kd);
     printf("PID Controller initialized: Kp=%.2f, Ki=%.2f, Kd=%.2f\n", pid_kp, pid_ki, pid_kd);
+    
+    // Print signal sampling configuration
+    printf("Signal sampling interval: %d frames (%.1fHz at %d FPS)\n", 
+           signal_sampling_interval, (float)target_fps / signal_sampling_interval, target_fps);
     
     // Set real-time priority for ultra-high performance racing VTX
     set_realtime_priority();
@@ -1350,10 +1362,10 @@ int main() {
         
         loop_counter++;
         
-        // Only read signal data every 5 frames to reduce I/O overhead
+        // Only read signal data at configurable intervals to reduce I/O overhead
         // This gives us frame-synced control with reduced signal reading frequency
-        // At 120Hz frame rate: 120Hz control loop, 24Hz signal sampling (optimal for video quality)
-        if (loop_counter % 5 == 0) {
+        // At 120Hz frame rate with interval=5: 120Hz control loop, 24Hz signal sampling
+        if (loop_counter % signal_sampling_interval == 0) {
             currentDb = dbm - aDb;
             dbm = get_dbm();
             aDb = dbm; 
@@ -1384,7 +1396,7 @@ int main() {
       
 #ifdef DEBUG
         // Only show debug output when we read new signal data
-        if (loop_counter % 5 == 0) {
+        if (loop_counter % signal_sampling_interval == 0) {
             printf("vlq = %.2f%%\n", vlq);
             printf("rssi = %d (filtered: %.1f)\n", rssi, filtered_rssi);
             printf("adb= %d\n", aDb);
@@ -1426,7 +1438,7 @@ int main() {
                 if (bitrate > bitrate_max) bitrate = bitrate_max;
                 
 #ifdef DEBUG
-                if (loop_counter % 5 == 0) {
+                if (loop_counter % signal_sampling_interval == 0) {
                     printf("Target: %d, Current: %d, PID Adj: %d, Final: %d\n", 
                            target_bitrate, last_bitrate, pid_adjustment, bitrate);
                 }
