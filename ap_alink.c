@@ -28,6 +28,12 @@ typedef struct {
     float measurement_variance; // Measurement noise variance
 } kalman_filter_t;
 
+// Control Algorithm Types
+typedef enum {
+    CONTROL_ALGORITHM_PID = 0,      // PID controller (complex, smooth)
+    CONTROL_ALGORITHM_FIFO = 1      // Simple FIFO (fast, direct)
+} control_algorithm_t;
+
 // Asymmetric Cooldown Constants
 #define STRICT_COOLDOWN_MS 200      // 200ms minimum between changes
 #define UP_COOLDOWN_MS 3000         // 3s before increasing bitrate
@@ -1046,7 +1052,8 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *rssi_filter_chain_config, char *dbm_filter_chain_config,
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
-             int *signal_sampling_interval, unsigned long *emergency_cooldown) {
+             int *signal_sampling_interval, unsigned long *emergency_cooldown,
+             int *control_algorithm) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1136,6 +1143,9 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         }
         else if (strncmp(line, "emergency_cooldown_ms=", 22) == 0) {
             sscanf(line + 22, "%lu", emergency_cooldown);
+        }
+        else if (strncmp(line, "control_algorithm=", 18) == 0) {
+            sscanf(line + 18, "%d", control_algorithm);
         }
     }
 
@@ -1366,6 +1376,9 @@ int main() {
     // Emergency cooldown configuration
     unsigned long emergency_cooldown_ms = EMERGENCY_COOLDOWN_MS;  // Default: 50ms
 
+    // Control algorithm configuration
+    int control_algorithm = CONTROL_ALGORITHM_FIFO;  // Default: Simple FIFO (more performant)
+
     // Filtered values
     float filtered_rssi = 50.0f;
     float filtered_dbm = -60.0f;
@@ -1381,7 +1394,7 @@ int main() {
            rssi_filter_chain_config, dbm_filter_chain_config,
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
-           &signal_sampling_interval, &emergency_cooldown_ms);
+           &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm);
     
     // Parse and configure filter chains
     parse_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
@@ -1404,6 +1417,13 @@ int main() {
     // Print emergency cooldown configuration
     printf("Emergency cooldown: %lums (%.1f frames at %d FPS)\n", 
            emergency_cooldown_ms, (float)emergency_cooldown_ms * target_fps / 1000.0, target_fps);
+    
+    // Print control algorithm configuration
+    if (control_algorithm == CONTROL_ALGORITHM_PID) {
+        printf("Control algorithm: PID Controller (smooth transitions)\n");
+    } else {
+        printf("Control algorithm: Simple FIFO (fast, direct)\n");
+    }
     
     // Print memory mapping optimization status
     printf("Memory-mapped file optimization: ENABLED\n");
@@ -1537,23 +1557,34 @@ int main() {
                        
             }
              else {
-                // Calculate target bitrate using VLQ (your existing logic)
+                // Calculate target bitrate using VLQ
                 int target_bitrate = (int)(bitrate_max * vlq / 100.0);
                 
-                // Apply PID controller to smooth the transition to target
-                int pid_adjustment = pid_calculate(&bitrate_pid, target_bitrate, last_bitrate);
-                bitrate = last_bitrate + pid_adjustment;
+                if (control_algorithm == CONTROL_ALGORITHM_PID) {
+                    // PID Controller: Smooth transitions with PID control
+                    int pid_adjustment = pid_calculate(&bitrate_pid, target_bitrate, last_bitrate);
+                    bitrate = last_bitrate + pid_adjustment;
+                    
+#ifdef DEBUG
+                    if (loop_counter % signal_sampling_interval == 0) {
+                        printf("PID: Target=%d, Current=%d, Adj=%d, Final=%d\n", 
+                               target_bitrate, last_bitrate, pid_adjustment, bitrate);
+                    }
+#endif
+                } else {
+                    // Simple FIFO: Direct assignment (faster, more responsive)
+                    bitrate = target_bitrate;
+                    
+#ifdef DEBUG
+                    if (loop_counter % signal_sampling_interval == 0) {
+                        printf("FIFO: Target=%d, Final=%d\n", target_bitrate, bitrate);
+                    }
+#endif
+                }
                 
                 // Clamp bitrate to valid range
                 if (bitrate < bitrate_min) bitrate = bitrate_min;
                 if (bitrate > bitrate_max) bitrate = bitrate_max;
-                
-#ifdef DEBUG
-                if (loop_counter % signal_sampling_interval == 0) {
-                    printf("Target: %d, Current: %d, PID Adj: %d, Final: %d\n", 
-                           target_bitrate, last_bitrate, pid_adjustment, bitrate);
-                }
-#endif
             }
 
             // Apply asymmetric cooldown logic before changing bitrate

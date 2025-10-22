@@ -119,6 +119,12 @@ signal_sampling_interval=5
 # At 120 FPS: 50ms=6 frames, 25ms=3 frames, 8ms=1 frame
 # For ultra-low latency racing, use 8-25ms (1-3 frames)
 emergency_cooldown_ms=50
+
+# Control Algorithm Configuration
+# 0 = PID Controller (smooth transitions, more complex)
+# 1 = Simple FIFO (fast, direct, more performant)
+# Default: 1 (Simple FIFO for better performance)
+control_algorithm=1
 ```
 
 ### **Configuration Parameters Explained**
@@ -183,7 +189,57 @@ emergency_cooldown_ms=50
   - Default: 50ms (6 frames at 120 FPS)
   - For ultra-low latency racing: use 8-25ms (1-3 frames)
 
-## Filter Comparison Guide
+#### **Control Algorithm Configuration**
+- **`control_algorithm`**: Choose between PID controller and Simple FIFO
+  - **0 = PID Controller**: Smooth transitions, more complex, higher CPU usage
+  - **1 = Simple FIFO**: Fast, direct, more performant, lower CPU usage
+  - **Default: 1** (Simple FIFO for better performance)
+
+## Control Algorithm Comparison
+
+### **Control Algorithm Performance Comparison**
+
+| Algorithm | Responsiveness | CPU Usage | Smoothness | Stability | Best For |
+|-----------|---------------|-----------|------------|-----------|----------|
+| **PID Controller (0)** | Good | Medium | Excellent | Good | Smooth streaming, stable connections |
+| **Simple FIFO (1)** | Excellent | Low | Good | Excellent | Racing, low latency, FPV |
+
+### **Control Algorithm Selection Guide**
+
+#### **Choose PID Controller (0) when:**
+- You want smooth bitrate transitions
+- Video quality stability is more important than responsiveness
+- You're doing general-purpose streaming
+- You have sufficient CPU resources
+- You want to minimize bitrate oscillation
+
+#### **Choose Simple FIFO (1) when:**
+- You need maximum responsiveness
+- You're racing or doing FPV
+- CPU resources are limited
+- Low latency is critical
+- You want direct, immediate bitrate changes
+
+### **Algorithm Implementation Details**
+
+#### **PID Controller (control_algorithm=0)**
+```c
+// PID Controller: Smooth transitions with PID control
+int pid_adjustment = pid_calculate(&bitrate_pid, target_bitrate, last_bitrate);
+bitrate = last_bitrate + pid_adjustment;
+```
+- **Pros**: Smooth transitions, reduces oscillation, adaptive behavior
+- **Cons**: Higher CPU usage, more complex, potential instability
+- **Use Case**: Smooth video streaming, stable connections
+
+#### **Simple FIFO (control_algorithm=1)**
+```c
+// Simple FIFO: Direct assignment (faster, more responsive)
+bitrate = target_bitrate;
+```
+- **Pros**: Maximum performance, direct response, lower CPU usage
+- **Cons**: May cause more frequent bitrate changes
+- **Use Case**: Racing, low-latency applications, maximum responsiveness
 
 ### **Filter Performance Comparison**
 
@@ -298,6 +354,7 @@ racing_dbm_filter_chain=1  # Low-Pass for fast response
 # Performance optimizations
 signal_sampling_interval=2  # 120Hz sampling at 240 FPS
 emergency_cooldown_ms=25    # 3 frames at 240 FPS
+control_algorithm=1         # Simple FIFO for maximum responsiveness
 
 lpf_cutoff_freq=5.0
 strict_cooldown_ms=100
@@ -318,6 +375,7 @@ racing_dbm_filter_chain=1  # Low-Pass for speed
 # Ultra-fast sampling and cooldown
 signal_sampling_interval=1  # 120Hz sampling (every frame)
 emergency_cooldown_ms=8     # 1 frame cooldown
+control_algorithm=1         # Simple FIFO for maximum responsiveness
 
 # Aggressive settings
 lpf_cutoff_freq=10.0        # Higher cutoff for faster response
@@ -335,12 +393,18 @@ dbm_filter_chain=0
 kalman_rssi_process=0.000001
 up_cooldown_ms=5000
 pid_kp=0.8
+control_algorithm=0         # PID for smooth transitions
+signal_sampling_interval=10 # Lower sampling for stability
+emergency_cooldown_ms=100   # Slower emergency response
 ```
 
 ### **Mixed Approach**
 ```ini
 rssi_filter_chain=0    # Kalman for RSSI (more sophisticated)
 dbm_filter_chain=1     # Low-pass for dBm (simpler, faster)
+control_algorithm=1     # Simple FIFO for balanced performance
+signal_sampling_interval=5 # Default sampling rate
+emergency_cooldown_ms=50    # Default emergency response
 ```
 
 ### **Noisy Environment (Mode Filter)**
@@ -610,11 +674,13 @@ lsmod | grep 88
 #### **⚙️ New Configuration Options**
 - **`signal_sampling_interval`**: Control signal reading frequency (default: 5 frames)
 - **`emergency_cooldown_ms`**: Configure emergency bitrate drop timing (default: 50ms)
+- **`control_algorithm`**: Choose between PID controller (0) and Simple FIFO (1) (default: 1)
 
 #### **🎯 FPV-Optimized Features**
 - **Asymmetric Bitrate Control**: Fast drops, slow increases (perfect for FPV)
 - **Frame-Aware Timing**: All timings show exact frame counts
 - **Ultra-Low Latency Mode**: Single-frame cooldown support (8ms at 120 FPS)
+- **Control Algorithm Selection**: Choose between PID (smooth) and Simple FIFO (fast)
 
 #### **📊 Performance Metrics**
 - **Signal Reading**: 20-200x faster with memory mapping
@@ -627,6 +693,8 @@ lsmod | grep 88
 - **Path-Aware Mapping**: Automatic remapping when switching driver paths
 - **Error Handling**: Robust error handling for memory mapping operations
 - **Cleanup System**: Proper memory map cleanup on exit
+- **Control Algorithm Switch**: Runtime selection between PID and Simple FIFO
+- **Debug-Only Output**: Production builds exclude non-essential printf statements
 
 ### **v1.0 - Initial Release**
 - Advanced filter system with 5 filter types
