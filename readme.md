@@ -179,9 +179,14 @@ control_algorithm=1
 - **`racing_fps`**: Frame rate for racing mode (separate from normal `fps` setting)
 
 #### **Signal Sampling Configuration**
-- **`signal_sampling_interval`**: Number of frames between signal readings (higher = less CPU usage, lower = more responsive)
+- **`signal_sampling_interval`**: Number of frames between signal readings (legacy, higher = less CPU usage, lower = more responsive)
   - At 120 FPS: 1=120Hz sampling, 2=60Hz, 3=40Hz, 5=24Hz, 10=12Hz
   - Default: 5 (24Hz sampling at 120 FPS)
+- **`signal_sampling_freq_hz`**: Independent signal sampling frequency in Hz (not tied to frame rate)
+  - Higher values = more responsive to signal changes, more CPU usage
+  - Lower values = less CPU usage, less responsive to signal changes
+  - Default: 50Hz (20ms intervals)
+  - Recommended: 50-100Hz for racing, 20-50Hz for general use
 
 #### **Emergency Cooldown Configuration**
 - **`emergency_cooldown_ms`**: Time between bitrate decreases (lower = faster response to signal drops)
@@ -194,6 +199,13 @@ control_algorithm=1
   - **0 = PID Controller**: Smooth transitions, more complex, higher CPU usage
   - **1 = Simple FIFO**: Fast, direct, more performant, lower CPU usage
   - **Default: 1** (Simple FIFO for better performance)
+
+#### **QP Delta Configuration (H.264/H.265 Encoder Quality Control)**
+- **`qp_delta_low`**: QP delta for low bitrate (MCS 1-2) - Default: 15 (was 30)
+- **`qp_delta_medium`**: QP delta for medium bitrate (MCS 3-9) - Default: 5
+- **`qp_delta_high`**: QP delta for high bitrate (MCS 10+) - Default: 0
+- **Lower values**: Better quality, higher bitrate usage
+- **Higher values**: Lower quality, more aggressive compression
 
 ## Control Algorithm Comparison
 
@@ -240,6 +252,48 @@ bitrate = target_bitrate;
 - **Pros**: Maximum performance, direct response, lower CPU usage
 - **Cons**: May cause more frequent bitrate changes
 - **Use Case**: Racing, low-latency applications, maximum responsiveness
+
+## QP Delta Configuration Guide
+
+### **What is QP Delta?**
+QP (Quantization Parameter) Delta controls the quality vs. bitrate trade-off in H.264/H.265 video encoding:
+- **Lower QP Delta**: Better quality, higher bitrate usage
+- **Higher QP Delta**: Lower quality, more aggressive compression
+- **Zero QP Delta**: Maximum quality for the given bitrate
+
+### **Bitrate Range Mapping**
+- **Low Bitrate (MCS 1-2)**: Uses `qp_delta_low` - Higher compression for low bandwidth
+- **Medium Bitrate (MCS 3-9)**: Uses `qp_delta_medium` - Balanced quality/compression
+- **High Bitrate (MCS 10+)**: Uses `qp_delta_high` - Maximum quality for high bandwidth
+
+### **QP Delta Selection Guide**
+
+#### **Conservative Quality (Lower QP Delta)**
+```ini
+qp_delta_low=10      # Better quality at low bitrate
+qp_delta_medium=3    # High quality at medium bitrate
+qp_delta_high=0       # Maximum quality at high bitrate
+```
+- **Best for**: High-quality streaming, stable connections
+- **Trade-off**: Higher bitrate usage, less aggressive compression
+
+#### **Aggressive Compression (Higher QP Delta)**
+```ini
+qp_delta_low=25      # More compression at low bitrate
+qp_delta_medium=10   # Moderate compression at medium bitrate
+qp_delta_high=5      # Light compression at high bitrate
+```
+- **Best for**: Low bandwidth, unstable connections
+- **Trade-off**: Lower quality, more aggressive compression
+
+#### **Balanced Approach (Default)**
+```ini
+qp_delta_low=15      # Balanced low bitrate compression
+qp_delta_medium=5    # Balanced medium bitrate compression
+qp_delta_high=0      # Maximum quality at high bitrate
+```
+- **Best for**: General purpose, mixed conditions
+- **Trade-off**: Good balance of quality and compression
 
 ### **Filter Performance Comparison**
 
@@ -353,8 +407,14 @@ racing_dbm_filter_chain=1  # Low-Pass for fast response
 
 # Performance optimizations
 signal_sampling_interval=2  # 120Hz sampling at 240 FPS
+signal_sampling_freq_hz=100  # 100Hz independent signal sampling for maximum responsiveness
 emergency_cooldown_ms=25    # 3 frames at 240 FPS
 control_algorithm=1         # Simple FIFO for maximum responsiveness
+
+# QP Delta configuration for racing
+qp_delta_low=20      # Aggressive compression for low bitrate
+qp_delta_medium=8    # Moderate compression for medium bitrate
+qp_delta_high=0      # Maximum quality for high bitrate
 
 lpf_cutoff_freq=5.0
 strict_cooldown_ms=100
@@ -374,8 +434,14 @@ racing_dbm_filter_chain=1  # Low-Pass for speed
 
 # Ultra-fast sampling and cooldown
 signal_sampling_interval=1  # 120Hz sampling (every frame)
+signal_sampling_freq_hz=120 # 120Hz independent signal sampling (every 8.33ms)
 emergency_cooldown_ms=8     # 1 frame cooldown
 control_algorithm=1         # Simple FIFO for maximum responsiveness
+
+# Ultra-aggressive QP Delta for maximum compression
+qp_delta_low=30      # Maximum compression for low bitrate
+qp_delta_medium=15   # High compression for medium bitrate
+qp_delta_high=5      # Light compression for high bitrate
 
 # Aggressive settings
 lpf_cutoff_freq=10.0        # Higher cutoff for faster response
@@ -395,7 +461,13 @@ up_cooldown_ms=5000
 pid_kp=0.8
 control_algorithm=0         # PID for smooth transitions
 signal_sampling_interval=10 # Lower sampling for stability
+signal_sampling_freq_hz=20  # 20Hz independent signal sampling for stability
 emergency_cooldown_ms=100   # Slower emergency response
+
+# Conservative QP Delta for high quality
+qp_delta_low=8       # Better quality at low bitrate
+qp_delta_medium=2     # High quality at medium bitrate
+qp_delta_high=0       # Maximum quality at high bitrate
 ```
 
 ### **Mixed Approach**
@@ -404,7 +476,13 @@ rssi_filter_chain=0    # Kalman for RSSI (more sophisticated)
 dbm_filter_chain=1     # Low-pass for dBm (simpler, faster)
 control_algorithm=1     # Simple FIFO for balanced performance
 signal_sampling_interval=5 # Default sampling rate
+signal_sampling_freq_hz=50 # 50Hz independent signal sampling (default)
 emergency_cooldown_ms=50    # Default emergency response
+
+# Balanced QP Delta (default values)
+qp_delta_low=15      # Balanced low bitrate compression
+qp_delta_medium=5    # Balanced medium bitrate compression
+qp_delta_high=0      # Maximum quality at high bitrate
 ```
 
 ### **Noisy Environment (Mode Filter)**
@@ -675,18 +753,22 @@ lsmod | grep 88
 - **`signal_sampling_interval`**: Control signal reading frequency (default: 5 frames)
 - **`emergency_cooldown_ms`**: Configure emergency bitrate drop timing (default: 50ms)
 - **`control_algorithm`**: Choose between PID controller (0) and Simple FIFO (1) (default: 1)
+- **`qp_delta_low/medium/high`**: Configure H.264/H.265 encoder quality vs. compression (default: 15/5/0)
+- **`signal_sampling_freq_hz`**: Independent signal sampling frequency in Hz (default: 50Hz)
 
 #### **🎯 FPV-Optimized Features**
 - **Asymmetric Bitrate Control**: Fast drops, slow increases (perfect for FPV)
 - **Frame-Aware Timing**: All timings show exact frame counts
 - **Ultra-Low Latency Mode**: Single-frame cooldown support (8ms at 120 FPS)
 - **Control Algorithm Selection**: Choose between PID (smooth) and Simple FIFO (fast)
+- **Configurable QP Delta**: Fine-tune H.264/H.265 encoder quality vs. compression per bitrate range
+- **Independent Signal Sampling**: Signal quality sampling independent of frame rate for better responsiveness
 
 #### **📊 Performance Metrics**
 - **Signal Reading**: 20-200x faster with memory mapping
 - **Emergency Response**: 4x faster (200ms → 50ms default)
 - **HTTP Requests**: 10x faster with fire-and-forget optimization
-- **CPU Usage**: Reduced I/O overhead
+- **CPU Usage**: Reduced I/O overhead and eliminated busy-wait loops
 - **Memory Efficiency**: Optimized file handling
 
 #### **🔧 Technical Improvements**
@@ -697,6 +779,9 @@ lsmod | grep 88
 - **Control Algorithm Switch**: Runtime selection between PID and Simple FIFO
 - **Debug-Only Output**: Production builds exclude non-essential printf statements
 - **Fire-and-Forget HTTP**: Optimized HTTP requests that don't wait for responses
+- **Configurable QP Delta**: Per-bitrate-range H.264/H.265 encoder quality control
+- **Efficient Frame Timing**: Precise nanosleep() instead of busy-wait loops
+- **Independent Signal Sampling**: Signal quality sampling independent of frame rate
 
 ### **v1.0 - Initial Release**
 - Advanced filter system with 5 filter types

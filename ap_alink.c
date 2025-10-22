@@ -898,22 +898,6 @@ void init_frame_sync(int fps) {
            target_fps, frame_interval_ns / 1000000.0);
 }
 
-// Check if it's time for next frame (returns true if frame should be processed)
-int is_frame_time() {
-    struct timespec current_time;
-    clock_gettime(CLOCK_MONOTONIC, &current_time);
-    
-    long elapsed_ns = (current_time.tv_sec - last_frame_time.tv_sec) * 1000000000L + 
-                      (current_time.tv_nsec - last_frame_time.tv_nsec);
-    
-    if (elapsed_ns >= frame_interval_ns) {
-        last_frame_time = current_time;
-        return 1;  // Time for next frame
-    }
-    
-    return 0;  // Not yet time for next frame
-}
-
 // Optimized HTTP GET implementation - fire-and-forget for FPV applications
 int http_get(const char *path) {
     int s;
@@ -975,6 +959,11 @@ static sem_t worker_sem;
 static worker_cmd_t pending_cmd;
 static int worker_running = 0;
 
+// Global QP delta configuration (set by main thread, read by worker thread)
+static int global_qp_delta_low = 15;
+static int global_qp_delta_medium = 5;
+static int global_qp_delta_high = 0;
+
 // Worker thread that processes API calls
 void *worker_thread_func(void *arg) {
     char cmd[512];
@@ -1001,17 +990,26 @@ void *worker_thread_func(void *arg) {
                 char *mcspath = data->mcspath;
                 
                 if (bitrateMcs >= 1 && bitrateMcs < 3) {
-                    http_get("/api/v1/set?fpv.roiQp=30,0,0,30");
+                    char qp_path[128];
+                    snprintf(qp_path, sizeof(qp_path), "/api/v1/set?fpv.roiQp=%d,0,0,%d", 
+                             global_qp_delta_low, global_qp_delta_low);
+                    http_get(qp_path);
                     snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
                     (void)system(cmd);
                 }
                 else if (bitrateMcs >= 3 && bitrateMcs < 10) {
-                    http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
+                    char qp_path[128];
+                    snprintf(qp_path, sizeof(qp_path), "/api/v1/set?fpv.roiQp=%d,0,0,%d", 
+                             global_qp_delta_medium, global_qp_delta_medium);
+                    http_get(qp_path);
                     snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
                     (void)system(cmd);
                 }
                 else {
-                    http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
+                    char qp_path[128];
+                    snprintf(qp_path, sizeof(qp_path), "/api/v1/set?fpv.roiQp=%d,0,0,%d", 
+                             global_qp_delta_high, global_qp_delta_high);
+                    http_get(qp_path);
                     snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
                     (void)system(cmd);
                 }
@@ -1052,7 +1050,8 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
              int *signal_sampling_interval, unsigned long *emergency_cooldown,
-             int *control_algorithm) {
+             int *control_algorithm, int *qp_delta_low, int *qp_delta_medium, int *qp_delta_high,
+             int *signal_sampling_freq_hz) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1064,87 +1063,131 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
     while (fgets(line, sizeof(line), fp)) {
         if (strncmp(line, "bitrate_max=", 12) == 0) {
             sscanf(line + 12, "%d", BITRATE_MAX);
-        }  
-        else if (strncmp(line, "wificard=", 9) == 0) {
+            continue;
+        }
+        if (strncmp(line, "wificard=", 9) == 0) {
             sscanf(line + 9, "%63s", WIFICARD);
+            continue;
         }
-        else if (strncmp(line, "race_mode=", 10) == 0) {
+        if (strncmp(line, "race_mode=", 10) == 0) {
             sscanf(line + 10, "%d", RACE);
+            continue;
         }
-        else if (strncmp(line, "fps=", 4) == 0) {
+        if (strncmp(line, "fps=", 4) == 0) {
             sscanf(line + 4, "%d", FPS);
+            continue;
         }
-        else if (strncmp(line, "kalman_rssi_process=", 20) == 0) {
+        if (strncmp(line, "kalman_rssi_process=", 20) == 0) {
             sscanf(line + 20, "%f", rssi_process_var);
+            continue;
         }
-        else if (strncmp(line, "kalman_rssi_measure=", 20) == 0) {
+        if (strncmp(line, "kalman_rssi_measure=", 20) == 0) {
             sscanf(line + 20, "%f", rssi_measure_var);
+            continue;
         }
-        else if (strncmp(line, "kalman_dbm_process=", 19) == 0) {
+        if (strncmp(line, "kalman_dbm_process=", 19) == 0) {
             sscanf(line + 19, "%f", dbm_process_var);
+            continue;
         }
-        else if (strncmp(line, "kalman_dbm_measure=", 19) == 0) {
+        if (strncmp(line, "kalman_dbm_measure=", 19) == 0) {
             sscanf(line + 19, "%f", dbm_measure_var);
+            continue;
         }
-        else if (strncmp(line, "strict_cooldown_ms=", 19) == 0) {
+        if (strncmp(line, "strict_cooldown_ms=", 19) == 0) {
             sscanf(line + 19, "%lu", strict_cooldown);
+            continue;
         }
-        else if (strncmp(line, "up_cooldown_ms=", 15) == 0) {
+        if (strncmp(line, "up_cooldown_ms=", 15) == 0) {
             sscanf(line + 15, "%lu", up_cooldown);
+            continue;
         }
-        else if (strncmp(line, "min_change_percent=", 19) == 0) {
+        if (strncmp(line, "min_change_percent=", 19) == 0) {
             sscanf(line + 19, "%d", min_change_percent);
+            continue;
         }
-        else if (strncmp(line, "emergency_rssi_threshold=", 25) == 0) {
+        if (strncmp(line, "emergency_rssi_threshold=", 25) == 0) {
             sscanf(line + 25, "%d", emergency_rssi_threshold);
+            continue;
         }
-        else if (strncmp(line, "emergency_bitrate=", 18) == 0) {
+        if (strncmp(line, "emergency_bitrate=", 18) == 0) {
             sscanf(line + 18, "%d", emergency_bitrate);
+            continue;
         }
-        else if (strncmp(line, "pid_kp=", 7) == 0) {
+        if (strncmp(line, "pid_kp=", 7) == 0) {
             sscanf(line + 7, "%f", pid_kp);
+            continue;
         }
-        else if (strncmp(line, "pid_ki=", 7) == 0) {
+        if (strncmp(line, "pid_ki=", 7) == 0) {
             sscanf(line + 7, "%f", pid_ki);
+            continue;
         }
-        else if (strncmp(line, "pid_kd=", 7) == 0) {
+        if (strncmp(line, "pid_kd=", 7) == 0) {
             sscanf(line + 7, "%f", pid_kd);
+            continue;
         }
-        else if (strncmp(line, "rssi_filter_chain=", 18) == 0) {
+        if (strncmp(line, "rssi_filter_chain=", 18) == 0) {
             sscanf(line + 18, "%63s", rssi_filter_chain_config);
+            continue;
         }
-        else if (strncmp(line, "dbm_filter_chain=", 17) == 0) {
+        if (strncmp(line, "dbm_filter_chain=", 17) == 0) {
             sscanf(line + 17, "%63s", dbm_filter_chain_config);
+            continue;
         }
-        else if (strncmp(line, "racing_rssi_filter_chain=", 24) == 0) {
+        if (strncmp(line, "racing_rssi_filter_chain=", 24) == 0) {
             sscanf(line + 24, "%63s", racing_rssi_filter_chain_config);
+            continue;
         }
-        else if (strncmp(line, "racing_dbm_filter_chain=", 23) == 0) {
+        if (strncmp(line, "racing_dbm_filter_chain=", 23) == 0) {
             sscanf(line + 23, "%63s", racing_dbm_filter_chain_config);
+            continue;
         }
-        else if (strncmp(line, "racing_video_resolution=", 24) == 0) {
+        if (strncmp(line, "racing_video_resolution=", 24) == 0) {
             sscanf(line + 24, "%63s", racing_video_resolution);
+            continue;
         }
-        else if (strncmp(line, "racing_exposure=", 16) == 0) {
+        if (strncmp(line, "racing_exposure=", 16) == 0) {
             sscanf(line + 16, "%d", racing_exposure);
+            continue;
         }
-        else if (strncmp(line, "racing_fps=", 11) == 0) {
+        if (strncmp(line, "racing_fps=", 11) == 0) {
             sscanf(line + 11, "%d", racing_fps);
+            continue;
         }
-        else if (strncmp(line, "lpf_cutoff_freq=", 16) == 0) {
+        if (strncmp(line, "lpf_cutoff_freq=", 16) == 0) {
             sscanf(line + 16, "%f", lpf_cutoff_freq);
+            continue;
         }
-        else if (strncmp(line, "lpf_sample_freq=", 16) == 0) {
+        if (strncmp(line, "lpf_sample_freq=", 16) == 0) {
             sscanf(line + 16, "%f", lpf_sample_freq);
+            continue;
         }
-        else if (strncmp(line, "signal_sampling_interval=", 26) == 0) {
+        if (strncmp(line, "signal_sampling_interval=", 26) == 0) {
             sscanf(line + 26, "%d", signal_sampling_interval);
+            continue;
         }
-        else if (strncmp(line, "emergency_cooldown_ms=", 22) == 0) {
+        if (strncmp(line, "emergency_cooldown_ms=", 22) == 0) {
             sscanf(line + 22, "%lu", emergency_cooldown);
+            continue;
         }
-        else if (strncmp(line, "control_algorithm=", 18) == 0) {
+        if (strncmp(line, "control_algorithm=", 18) == 0) {
             sscanf(line + 18, "%d", control_algorithm);
+            continue;
+        }
+        if (strncmp(line, "qp_delta_low=", 13) == 0) {
+            sscanf(line + 13, "%d", qp_delta_low);
+            continue;
+        }
+        if (strncmp(line, "qp_delta_medium=", 16) == 0) {
+            sscanf(line + 16, "%d", qp_delta_medium);
+            continue;
+        }
+        if (strncmp(line, "qp_delta_high=", 14) == 0) {
+            sscanf(line + 14, "%d", qp_delta_high);
+            continue;
+        }
+        if (strncmp(line, "signal_sampling_freq_hz=", 24) == 0) {
+            sscanf(line + 24, "%d", signal_sampling_freq_hz);
+            continue;
         }
     }
 
@@ -1369,8 +1412,14 @@ int main() {
     int racing_exposure = 11;                       // Default racing exposure
     int racing_fps = 120;                           // Default racing frame rate
 
+    // QP Delta configuration parameters (H.264/H.265 encoder quality control)
+    int qp_delta_low = 15;      // Default QP delta for low bitrate (was 30)
+    int qp_delta_medium = 5;    // Default QP delta for medium bitrate
+    int qp_delta_high = 0;      // Default QP delta for high bitrate
+
     // Signal sampling configuration
-    int signal_sampling_interval = 5;               // Default: sample every 5 frames
+    int signal_sampling_interval = 5;               // Default: sample every 5 frames (legacy)
+    int signal_sampling_freq_hz = 50;               // Default: 50Hz signal sampling (independent of frame rate)
 
     // Emergency cooldown configuration
     unsigned long emergency_cooldown_ms = EMERGENCY_COOLDOWN_MS;  // Default: 50ms
@@ -1393,7 +1442,13 @@ int main() {
            rssi_filter_chain_config, dbm_filter_chain_config,
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
-           &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm);
+           &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
+           &qp_delta_low, &qp_delta_medium, &qp_delta_high, &signal_sampling_freq_hz);
+    
+    // Set global QP delta values for worker thread
+    global_qp_delta_low = qp_delta_low;
+    global_qp_delta_medium = qp_delta_medium;
+    global_qp_delta_high = qp_delta_high;
     
     // Parse and configure filter chains
     parse_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
@@ -1432,6 +1487,14 @@ int main() {
     
     // Initialize frame-sync timing
     init_frame_sync(target_fps);
+    
+    // Initialize signal sampling timing (independent of frame rate)
+    long signal_sampling_interval_ns = 1000000000L / signal_sampling_freq_hz;  // Convert Hz to nanoseconds
+    struct timespec last_signal_time = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &last_signal_time);
+    
+    printf("Signal sampling frequency: %d Hz (%.2f ms interval)\n", 
+           signal_sampling_freq_hz, signal_sampling_interval_ns / 1000000.0);
     
     // Initialize worker thread
     sem_init(&worker_sem, 0, 0);
@@ -1484,35 +1547,67 @@ int main() {
     }
     
     while (1) {
-        // Frame-sync timing: only process when it's time for next frame
-        if (!is_frame_time()) {
-            usleep(100);  // Short sleep to avoid busy waiting
+        // Frame-sync timing: sleep for exact frame duration
+        struct timespec current_time;
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+        
+        long elapsed_ns = (current_time.tv_sec - last_frame_time.tv_sec) * 1000000000L + 
+                          (current_time.tv_nsec - last_frame_time.tv_nsec);
+        
+        if (elapsed_ns < frame_interval_ns) {
+            // Sleep for the remaining frame duration
+            long sleep_ns = frame_interval_ns - elapsed_ns;
+            struct timespec sleep_time = {
+                .tv_sec = sleep_ns / 1000000000L,
+                .tv_nsec = sleep_ns % 1000000000L
+            };
+            nanosleep(&sleep_time, NULL);
             continue;
         }
         
+        // Update frame time and proceed
+        last_frame_time = current_time;
+        
         loop_counter++;
         
-        // Only read signal data at configurable intervals to reduce I/O overhead
-        // This gives us frame-synced control with reduced signal reading frequency
-        // At 120Hz frame rate with interval=5: 120Hz control loop, 24Hz signal sampling
-        if (loop_counter % signal_sampling_interval == 0) {
+        // Independent signal sampling timing (not tied to frame rate)
+        // This allows for higher frequency signal sampling than frame rate
+        struct timespec current_signal_time;
+        clock_gettime(CLOCK_MONOTONIC, &current_signal_time);
+        
+        long signal_elapsed_ns = (current_signal_time.tv_sec - last_signal_time.tv_sec) * 1000000000L + 
+                                 (current_signal_time.tv_nsec - last_signal_time.tv_nsec);
+        
+#ifdef DEBUG
+        bool new_signal_data = false;  // Flag for debug output
+#endif
+        if (signal_elapsed_ns >= signal_sampling_interval_ns) {
+            // Time to sample signal - update timing
+            last_signal_time = current_signal_time;
+            
+            // Read signal data
             currentDb = dbm - aDb;
             dbm = get_dbm();
             aDb = dbm; 
             rssi = get_rssi(driverpath);
             
-        // Apply filter chains to smooth the signals
-        // Use racing filter chains when race_mode=1, normal filter chains when race_mode=0
-        if (RaceMode == 1) {
-            filtered_rssi = apply_filter_chain(&rssi_race_filter_chain, (float)rssi);
-            filtered_dbm = apply_filter_chain(&dbm_race_filter_chain, (float)dbm);
-        } else {
-            filtered_rssi = apply_filter_chain(&rssi_filter_chain, (float)rssi);
-            filtered_dbm = apply_filter_chain(&dbm_filter_chain, (float)dbm);
-        }
-        
-        // Check for emergency drop conditions
-        check_emergency_drop(last_bitrate, filtered_rssi, emergency_rssi_threshold, emergency_bitrate);
+            // Apply filter chains to smooth the signals
+            // Use racing filter chains when race_mode=1, normal filter chains when race_mode=0
+            if (RaceMode == 1) {
+                filtered_rssi = apply_filter_chain(&rssi_race_filter_chain, (float)rssi);
+                filtered_dbm = apply_filter_chain(&dbm_race_filter_chain, (float)dbm);
+            } else {
+                filtered_rssi = apply_filter_chain(&rssi_filter_chain, (float)rssi);
+                filtered_dbm = apply_filter_chain(&dbm_filter_chain, (float)dbm);
+            }
+            
+            // Check for emergency drop conditions
+            check_emergency_drop(last_bitrate, filtered_rssi, emergency_rssi_threshold, emergency_bitrate);
+            
+#ifdef DEBUG
+            // Flag that we have new signal data for debug output
+            new_signal_data = true;
+#endif
         }
         
         //calculation of dbm_Max dbm_Min
@@ -1526,7 +1621,7 @@ int main() {
       
 #ifdef DEBUG
         // Only show debug output when we read new signal data
-        if (loop_counter % signal_sampling_interval == 0) {
+        if (new_signal_data) {
             printf("vlq = %.2f%%\n", vlq);
             printf("rssi = %d (filtered: %.1f)\n", rssi, filtered_rssi);
             printf("adb= %d\n", aDb);
@@ -1565,7 +1660,7 @@ int main() {
                     bitrate = last_bitrate + pid_adjustment;
                     
 #ifdef DEBUG
-                    if (loop_counter % signal_sampling_interval == 0) {
+                    if (new_signal_data) {
                         printf("PID: Target=%d, Current=%d, Adj=%d, Final=%d\n", 
                                target_bitrate, last_bitrate, pid_adjustment, bitrate);
                     }
@@ -1575,7 +1670,7 @@ int main() {
                     bitrate = target_bitrate;
                     
 #ifdef DEBUG
-                    if (loop_counter % signal_sampling_interval == 0) {
+                    if (new_signal_data) {
                         printf("FIFO: Target=%d, Final=%d\n", target_bitrate, bitrate);
                     }
 #endif
