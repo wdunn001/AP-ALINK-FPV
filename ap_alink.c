@@ -914,16 +914,17 @@ int is_frame_time() {
     return 0;  // Not yet time for next frame
 }
 
-// Raw HTTP GET implementation (much faster than wget)
+// Optimized HTTP GET implementation - fire-and-forget for FPV applications
 int http_get(const char *path) {
     int s;
     struct sockaddr_in addr;
     char req[256];
-    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    // Fast timeout since we don't wait for responses
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; // 100ms timeout
 
     if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0) return -1;
 
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    // Only set send timeout since we don't receive responses
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     addr.sin_family = AF_INET;
@@ -941,9 +942,7 @@ int http_get(const char *path) {
         return -1;
     }
 
-    char buf[64];
-    while (recv(s, buf, sizeof(buf), 0) > 0);
-
+    // Close immediately - no need to wait for response in FPV applications
     close(s);
     return 0;
 }

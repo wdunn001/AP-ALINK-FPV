@@ -685,6 +685,7 @@ lsmod | grep 88
 #### **📊 Performance Metrics**
 - **Signal Reading**: 20-200x faster with memory mapping
 - **Emergency Response**: 4x faster (200ms → 50ms default)
+- **HTTP Requests**: 10x faster with fire-and-forget optimization
 - **CPU Usage**: Reduced I/O overhead
 - **Memory Efficiency**: Optimized file handling
 
@@ -695,6 +696,7 @@ lsmod | grep 88
 - **Cleanup System**: Proper memory map cleanup on exit
 - **Control Algorithm Switch**: Runtime selection between PID and Simple FIFO
 - **Debug-Only Output**: Production builds exclude non-essential printf statements
+- **Fire-and-Forget HTTP**: Optimized HTTP requests that don't wait for responses
 
 ### **v1.0 - Initial Release**
 - Advanced filter system with 5 filter types
