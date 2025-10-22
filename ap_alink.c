@@ -10,11 +10,64 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
+#include <sched.h>
 
 
 
 void autopower() {
     system("iw wlan0 set tx power auto");
+}
+
+// Set real-time priority for ultra-high performance racing VTX
+int set_realtime_priority() {
+    struct sched_param param;
+    
+    // Set high real-time priority
+    param.sched_priority = 50;  // High priority (1-99 range)
+    
+    // Use SCHED_FIFO for consistent timing
+    if (sched_setscheduler(0, SCHED_FIFO, &param) == -1) {
+        perror("Failed to set real-time priority");
+        printf("Note: Real-time priority requires root privileges\n");
+        printf("Run with: sudo ./ap_alink\n");
+        return -1;
+    }
+    
+    printf("Real-time priority set successfully (SCHED_FIFO, priority 50)\n");
+    return 0;
+}
+
+// Frame-sync timing for optimal video quality
+static struct timespec last_frame_time;
+static int target_fps = 120;  // Default racing frame rate
+static long frame_interval_ns = 0;
+
+// Initialize frame-sync timing
+void init_frame_sync(int fps) {
+    target_fps = fps;
+    frame_interval_ns = 1000000000L / target_fps;  // Convert to nanoseconds
+    
+    // Get current time as starting point
+    clock_gettime(CLOCK_MONOTONIC, &last_frame_time);
+    
+    printf("Frame-sync initialized: %d FPS (%.2f ms interval)\n", 
+           target_fps, frame_interval_ns / 1000000.0);
+}
+
+// Check if it's time for next frame (returns true if frame should be processed)
+int is_frame_time() {
+    struct timespec current_time;
+    clock_gettime(CLOCK_MONOTONIC, &current_time);
+    
+    long elapsed_ns = (current_time.tv_sec - last_frame_time.tv_sec) * 1000000000L + 
+                      (current_time.tv_nsec - last_frame_time.tv_nsec);
+    
+    if (elapsed_ns >= frame_interval_ns) {
+        last_frame_time = current_time;
+        return 1;  // Time for next frame
+    }
+    
+    return 0;  // Not yet time for next frame
 }
 
 // Raw HTTP GET implementation (much faster than wget)
@@ -145,7 +198,7 @@ void set_mcs_async(int bitrateMcs, const char *mcspath) {
 
 
 
-void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE) {
+void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, int *FPS) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -164,6 +217,9 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE) {
         }
         else if (strncmp(line, "LowLatency=", 11) == 0) {
             sscanf(line + 11, "%d", RACE);
+        }
+        else if (strncmp(line, "fps=", 4) == 0) {
+            sscanf(line + 4, "%d", FPS);
         }
     }
 
@@ -289,14 +345,22 @@ int main() {
     char NIC[10] = {0};
     char driverpath[256] = {0};
     int RaceMode = 0;
-    int histeris = 3;
-    int minushisteris = -3;
+    int histeris = 1;      // Reduced hysteresis for faster racing response
+    int minushisteris = -1; // Reduced hysteresis for faster racing response
     int aDb = 0;
     int currentDb = 0;
     int dbm = -100;
+    int loop_counter = 0;  // Counter to reduce I/O frequency
+    int target_fps = 120;  // Default racing frame rate
     //char rssi_pattern[5] = {0};
 
-    config("/etc/ap_alink.conf", &bitrate_max, NIC, &RaceMode);
+    config("/etc/ap_alink.conf", &bitrate_max, NIC, &RaceMode, &target_fps);
+    
+    // Set real-time priority for ultra-high performance racing VTX
+    set_realtime_priority();
+    
+    // Initialize frame-sync timing
+    init_frame_sync(target_fps);
     
     // Initialize worker thread
     sem_init(&worker_sem, 0, 0);
@@ -343,10 +407,22 @@ int main() {
     }
     
     while (1) {
-        currentDb = dbm - aDb;
-        dbm = get_dbm();
-        aDb = dbm; 
-        rssi = get_rssi(driverpath);
+        // Frame-sync timing: only process when it's time for next frame
+        if (!is_frame_time()) {
+            usleep(100);  // Short sleep to avoid busy waiting
+            continue;
+        }
+        
+        loop_counter++;
+        
+        // Only read signal data every 5 frames to reduce I/O overhead
+        // This gives us frame-synced control with reduced signal reading frequency
+        if (loop_counter % 5 == 0) {
+            currentDb = dbm - aDb;
+            dbm = get_dbm();
+            aDb = dbm; 
+            rssi = get_rssi(driverpath);
+        }
         
         //calculation of dbm_Max dbm_Min
         
@@ -357,11 +433,16 @@ int main() {
 
         double vlq = ((double)((dbm) - (dbm_Min)) / (double)((dbm_Max) - (dbm_Min))) * 100.0;
       
-        printf("vlq = %.2f%%\n", vlq);
-        printf("rssi = %d\n", rssi);
-        printf("adb= %d\n", aDb);
-        printf("dbm= %d\n", dbm);
-        printf("current %d\n", currentDb);
+#ifdef DEBUG
+        // Only show debug output when we read new signal data
+        if (loop_counter % 5 == 0) {
+            printf("vlq = %.2f%%\n", vlq);
+            printf("rssi = %d\n", rssi);
+            printf("adb= %d\n", aDb);
+            printf("dbm= %d\n", dbm);
+            printf("current %d\n", currentDb);
+        }
+#endif
         mspLQ(rssi);
 
              
@@ -392,8 +473,10 @@ int main() {
                 set_bitrate_async(bitrate);
                 set_mcs_async(bitrate, driverpath);
                 
+#ifdef DEBUG
         fflush(stdout);
-        usleep(100000);  // 100ms delay for proper loop timing
+#endif
+        // Frame-sync timing handles the delay automatically
     }
     
     // Cleanup worker thread
