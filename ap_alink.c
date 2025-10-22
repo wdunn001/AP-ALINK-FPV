@@ -15,7 +15,7 @@
 
 
 void autopower() {
-    system("iw wlan0 set tx power auto");
+    (void)system("iw wlan0 set tx power auto");
 }
 
 // Set real-time priority for ultra-high performance racing VTX
@@ -160,17 +160,17 @@ void *worker_thread_func(void *arg) {
                 if (bitrateMcs >= 1 && bitrateMcs < 3) {
                     http_get("/api/v1/set?fpv.roiQp=30,0,0,30");
                     snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
-                    system(cmd);
+                    (void)system(cmd);
                 }
                 else if (bitrateMcs >= 3 && bitrateMcs < 10) {
                     http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
                     snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
-                    system(cmd);
+                    (void)system(cmd);
                 }
                 else {
                     http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
                     snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
-                    system(cmd);
+                    (void)system(cmd);
                 }
                 break;
             }
@@ -206,7 +206,6 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
     }
 
     char line[128];
-    char wificard[64] = {0};
 
     while (fgets(line, sizeof(line), fp)) {
         if (strncmp(line, "bitrate_max=", 12) == 0) {
@@ -320,7 +319,7 @@ void mspLQ(int rssi_osd) {
              "echo \"VLQ %d &B &F60 &L30\" > /tmp/MSPOSD.msg",
               rssi_osd);
               //RSSI PATTERN *** ** * 
-    system(command);
+    (void)system(command);
 }
 
 
@@ -389,16 +388,16 @@ int main() {
         //SET BITRATE MAX 4MBPS
         bitrate_max=4;
         //SET BUFFER SETTING
-        system("sysctl -w net.core.rmem_default=16384");
-        system("sysctl -w net.core.rmem_max=65536");
-        system("sysctl -w net.core.wmem_default=16384");
-        system("sysctl -w net.core.wmem_max=65536");
-        system("ifconfig wlan0 txqueuelen 100");
-        system("sysctl -w net.core.netdev_max_backlog=64");
+        (void)system("sysctl -w net.core.rmem_default=16384");
+        (void)system("sysctl -w net.core.rmem_max=65536");
+        (void)system("sysctl -w net.core.wmem_default=16384");
+        (void)system("sysctl -w net.core.wmem_max=65536");
+        (void)system("ifconfig wlan0 txqueuelen 100");
+        (void)system("sysctl -w net.core.netdev_max_backlog=64");
         //SET 960x720120FPS
-        system("wget -qO- \"http://localhost/api/v1/set?video0.size=1280x720\" > /dev/null 2>&1");
-        system("wget -qO- \"http://localhost/api/v1/set?video0.fps=120\" > /dev/null 2>&1");
-        system("wget -qO- \"http://localhost/api/v1/set?isp.exposure=11\" > /dev/null 2>&1");                
+        (void)system("wget -qO- \"http://localhost/api/v1/set?video0.size=1280x720\" > /dev/null 2>&1");
+        (void)system("wget -qO- \"http://localhost/api/v1/set?video0.fps=120\" > /dev/null 2>&1");
+        (void)system("wget -qO- \"http://localhost/api/v1/set?isp.exposure=11\" > /dev/null 2>&1");                
         
     } else {
         printf("racemode disable\n");
@@ -477,6 +476,7 @@ int main() {
         fflush(stdout);
 #endif
         // Frame-sync timing handles the delay automatically
+        }
     }
     
     // Cleanup worker thread
@@ -486,6 +486,4 @@ int main() {
     sem_destroy(&worker_sem);
 
     return 0;
-
 }
-
