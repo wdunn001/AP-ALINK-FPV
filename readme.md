@@ -55,7 +55,7 @@ The system is configured via `/etc/ap_alink.conf`. Here's a complete configurati
 # Basic Settings
 bitrate_max=19
 wificard=8812eu2
-LowLatency=0
+race_mode=0
 fps=120
 
 # Filter Chain Configuration
@@ -100,13 +100,28 @@ pid_ki=0.05
 
 # Derivative gain - reduces overshoot and oscillation (higher = more damping)
 pid_kd=0.4
+
+# Racing Mode Configuration
+# racing_fps is used when racing mode is enabled, fps is used for normal operation
+racing_video_resolution=1280x720
+racing_exposure=11
+racing_fps=120
 ```
 
 ### **Configuration Parameters Explained**
 
+#### **Basic Settings**
+- **`race_mode`**: Enable racing mode (1=ON, 0=OFF) - uses racing_fps and racing-specific settings
+- **`fps`**: Normal mode frame rate (used when race_mode=0)
+- **`racing_fps`**: Racing mode frame rate (used when race_mode=1)
+
 #### **Filter Chain Configuration**
 - **`rssi_filter_chain`**: Comma-separated filter chain for RSSI signal (e.g., "2,0" for Mode→Kalman)
 - **`dbm_filter_chain`**: Comma-separated filter chain for dBm signal (e.g., "1" for single Low-Pass)
+
+#### **Racing Mode Filter Chain Configuration**
+- **`racing_rssi_filter_chain`**: Filter chain for RSSI when race_mode=1 (default: "1" for Low-Pass)
+- **`racing_dbm_filter_chain`**: Filter chain for dBm when race_mode=1 (default: "1" for Low-Pass)
 
 #### **Advanced Filter Options**
 - **Kalman Filter (0)**: Sophisticated adaptive filtering with optimal noise rejection
@@ -138,6 +153,11 @@ pid_kd=0.4
 - **`pid_kp`**: Proportional gain (immediate response)
 - **`pid_ki`**: Integral gain (steady-state error correction)
 - **`pid_kd`**: Derivative gain (overshoot prevention)
+
+#### **Racing Mode Configuration**
+- **`racing_video_resolution`**: Video resolution for racing mode (e.g., "1280x720", "1920x1080")
+- **`racing_exposure`**: Camera exposure setting for racing mode (lower = faster shutter)
+- **`racing_fps`**: Frame rate for racing mode (separate from normal `fps` setting)
 
 ## Filter Comparison Guide
 
@@ -213,17 +233,28 @@ dbm_filter_chain=0      # Kalman for dBm stability
 
 ### **Racing Mode (Low Latency)**
 ```ini
-LowLatency=1
-rssi_filter_chain=1
-dbm_filter_chain=1
+race_mode=1
+fps=60                    # Normal mode frame rate
+racing_fps=240            # Racing mode frame rate (higher for responsiveness)
+
+# Normal mode filters (used when race_mode=0)
+rssi_filter_chain=0        # Kalman for stability
+dbm_filter_chain=0        # Kalman for stability
+
+# Racing mode filters (used when race_mode=1)
+racing_rssi_filter_chain=1 # Low-Pass for fast response
+racing_dbm_filter_chain=1  # Low-Pass for fast response
+
 lpf_cutoff_freq=5.0
 strict_cooldown_ms=100
 pid_kp=1.5
+racing_video_resolution=1280x720
+racing_exposure=8
 ```
 
 ### **Long Range (Stability)**
 ```ini
-LowLatency=0
+race_mode=0
 rssi_filter_chain=0
 dbm_filter_chain=0
 kalman_rssi_process=0.000001
@@ -254,6 +285,35 @@ dbm_filter_chain=0     # Kalman for dBm stability
 rssi_filter_chain=4,0  # 2-Pole LPF→Kalman for professional filtering
 dbm_filter_chain=4,0   # 2-Pole LPF→Kalman with Butterworth response
 lpf_cutoff_freq=1.5    # Lower cutoff for more smoothing
+```
+
+### **Dual FPS System Example**
+```ini
+# Normal operation - conservative settings
+fps=30                  # Normal mode frame rate
+racing_fps=120          # Racing mode frame rate (4x faster)
+
+# Racing mode gets higher frame rate for responsiveness
+racing_video_resolution=1280x720
+racing_exposure=10
+
+# Normal mode uses higher exposure for better image quality
+# (exposure setting only applies to racing mode)
+```
+
+### **Dual Filter System Example**
+```ini
+# Normal mode - sophisticated filtering for stability
+race_mode=0
+rssi_filter_chain=0        # Kalman for optimal performance
+dbm_filter_chain=0        # Kalman for optimal performance
+
+# Racing mode - fast filtering for responsiveness
+race_mode=1
+racing_rssi_filter_chain=1 # Low-Pass for fast response
+racing_dbm_filter_chain=1  # Low-Pass for fast response
+
+# The system automatically switches between filter sets based on race_mode
 ```
 
 ## Running the Application

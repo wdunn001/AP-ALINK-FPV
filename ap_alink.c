@@ -101,6 +101,19 @@ static filter_chain_t dbm_filter_chain = {
     .enabled = true
 };
 
+// Global Racing Filter Chain instances (for race_mode=1)
+static filter_chain_t rssi_race_filter_chain = {
+    .filters = {FILTER_TYPE_LOWPASS},
+    .filter_count = 1,
+    .enabled = true
+};
+
+static filter_chain_t dbm_race_filter_chain = {
+    .filters = {FILTER_TYPE_LOWPASS},
+    .filter_count = 1,
+    .enabled = true
+};
+
 // Function declarations for filter operations
 float kalman_filter_update(kalman_filter_t *filter, float measurement);
 float lowpass_filter_apply(lowpass_filter_t *filter, float sample);
@@ -941,22 +954,22 @@ void *worker_thread_func(void *arg) {
             }
             case CMD_SET_MCS: {
                 mcs_arg_t *data = &cmd_to_process.data.mcs_data;
-    int bitrateMcs = data->bitrateMcs;
-    char *mcspath = data->mcspath;
+                int bitrateMcs = data->bitrateMcs;
+                char *mcspath = data->mcspath;
                 
-    if (bitrateMcs >= 1 && bitrateMcs < 3) {
+                if (bitrateMcs >= 1 && bitrateMcs < 3) {
                     http_get("/api/v1/set?fpv.roiQp=30,0,0,30");
-        snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
+                    snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
                     (void)system(cmd);
-    }
+                }
                 else if (bitrateMcs >= 3 && bitrateMcs < 10) {
                     http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
-        snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
+                    snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
                     (void)system(cmd);
-    }
-    else {
+                }
+                else {
                     http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
-        snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
+                    snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
                     (void)system(cmd);
                 }
                 break;
@@ -992,7 +1005,9 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              int *min_change_percent, int *emergency_rssi_threshold, int *emergency_bitrate,
              float *pid_kp, float *pid_ki, float *pid_kd,
              float *lpf_cutoff_freq, float *lpf_sample_freq,
-             char *rssi_filter_chain_config, char *dbm_filter_chain_config) {
+             char *rssi_filter_chain_config, char *dbm_filter_chain_config,
+             char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
+             char *racing_video_resolution, int *racing_exposure, int *racing_fps) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1008,8 +1023,8 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         else if (strncmp(line, "wificard=", 9) == 0) {
             sscanf(line + 9, "%63s", WIFICARD);
         }
-        else if (strncmp(line, "LowLatency=", 11) == 0) {
-            sscanf(line + 11, "%d", RACE);
+        else if (strncmp(line, "race_mode=", 10) == 0) {
+            sscanf(line + 10, "%d", RACE);
         }
         else if (strncmp(line, "fps=", 4) == 0) {
             sscanf(line + 4, "%d", FPS);
@@ -1056,6 +1071,21 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         else if (strncmp(line, "dbm_filter_chain=", 17) == 0) {
             sscanf(line + 17, "%63s", dbm_filter_chain_config);
         }
+        else if (strncmp(line, "racing_rssi_filter_chain=", 24) == 0) {
+            sscanf(line + 24, "%63s", racing_rssi_filter_chain_config);
+        }
+        else if (strncmp(line, "racing_dbm_filter_chain=", 23) == 0) {
+            sscanf(line + 23, "%63s", racing_dbm_filter_chain_config);
+        }
+        else if (strncmp(line, "racing_video_resolution=", 24) == 0) {
+            sscanf(line + 24, "%63s", racing_video_resolution);
+        }
+        else if (strncmp(line, "racing_exposure=", 16) == 0) {
+            sscanf(line + 16, "%d", racing_exposure);
+        }
+        else if (strncmp(line, "racing_fps=", 11) == 0) {
+            sscanf(line + 11, "%d", racing_fps);
+        }
         else if (strncmp(line, "lpf_cutoff_freq=", 16) == 0) {
             sscanf(line + 16, "%f", lpf_cutoff_freq);
         }
@@ -1097,15 +1127,15 @@ int get_dbm() {
             if (field_count == 2) {
                 // Convert signal level to dBm (it's in centi-dBm, so divide by 100)
                 dbm = atoi(token) / 100;
-                    break;
-                }
+                break;
+            }
             token = strtok(NULL, " \t");
             field_count++;
-            }
         }
+    }
 
 cleanup:
-        fclose(fp);
+    fclose(fp);
     return dbm;
 }
 
@@ -1127,11 +1157,11 @@ int get_rssi(const char *readcmd) {
         if (fp != NULL) {
             fclose(fp);
         }
-    fp = fopen(path, "r");
-    if (!fp) {
-        perror("fopen");
-        return rssi_percent;
-    }
+        fp = fopen(path, "r");
+        if (!fp) {
+            perror("fopen");
+            return rssi_percent;
+        }
         strcpy(last_path, path);
     } else {
         // Rewind to beginning for fresh read
@@ -1215,8 +1245,15 @@ int main() {
     // Filter chain configuration parameters
     char rssi_filter_chain_config[64] = "0";  // Default to single Kalman filter
     char dbm_filter_chain_config[64] = "0";   // Default to single Kalman filter
+    char racing_rssi_filter_chain_config[64] = "1";  // Default to Low-Pass for racing
+    char racing_dbm_filter_chain_config[64] = "1";   // Default to Low-Pass for racing
     float lpf_cutoff_freq = 2.0f;              // Default 2Hz cutoff
     float lpf_sample_freq = 10.0f;             // Default 10Hz sample rate
+
+    // Racing mode configuration parameters
+    char racing_video_resolution[64] = "1280x720";  // Default racing resolution
+    int racing_exposure = 11;                       // Default racing exposure
+    int racing_fps = 120;                           // Default racing frame rate
 
     // Filtered values
     float filtered_rssi = 50.0f;
@@ -1230,11 +1267,15 @@ int main() {
            &emergency_rssi_threshold, &emergency_bitrate,
            &pid_kp, &pid_ki, &pid_kd,
            &lpf_cutoff_freq, &lpf_sample_freq,
-           rssi_filter_chain_config, dbm_filter_chain_config);
+           rssi_filter_chain_config, dbm_filter_chain_config,
+           racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
+           racing_video_resolution, &racing_exposure, &racing_fps);
     
     // Parse and configure filter chains
     parse_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
     parse_filter_chain(dbm_filter_chain_config, &dbm_filter_chain);
+    parse_filter_chain(racing_rssi_filter_chain_config, &rssi_race_filter_chain);
+    parse_filter_chain(racing_dbm_filter_chain_config, &dbm_race_filter_chain);
     
     // Initialize filters with config values
     init_filters(rssi_process_var, rssi_measure_var, dbm_process_var, dbm_measure_var,
@@ -1283,10 +1324,16 @@ int main() {
         (void)system("sysctl -w net.core.wmem_max=65536");
         (void)system("ifconfig wlan0 txqueuelen 100");
         (void)system("sysctl -w net.core.netdev_max_backlog=64");
-        //SET 1280x720@120FPS with optimized HTTP calls
-        http_get("/api/v1/set?video0.size=1280x720");
-        http_get("/api/v1/set?video0.fps=120");
-        http_get("/api/v1/set?isp.exposure=11");                
+        //SET racing video configuration with optimized HTTP calls
+        char video_config[256];
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.size=%s", racing_video_resolution);
+        http_get(video_config);
+        
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.fps=%d", racing_fps);
+        http_get(video_config);
+        
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", racing_exposure);
+        http_get(video_config);                
         
     } else {
         printf("racemode disable\n");
@@ -1307,14 +1354,20 @@ int main() {
         // This gives us frame-synced control with reduced signal reading frequency
         // At 120Hz frame rate: 120Hz control loop, 24Hz signal sampling (optimal for video quality)
         if (loop_counter % 5 == 0) {
-        currentDb = dbm - aDb;
+            currentDb = dbm - aDb;
             dbm = get_dbm();
-        aDb = dbm; 
+            aDb = dbm; 
             rssi = get_rssi(driverpath);
             
         // Apply filter chains to smooth the signals
-        filtered_rssi = apply_filter_chain(&rssi_filter_chain, (float)rssi);
-        filtered_dbm = apply_filter_chain(&dbm_filter_chain, (float)dbm);
+        // Use racing filter chains when race_mode=1, normal filter chains when race_mode=0
+        if (RaceMode == 1) {
+            filtered_rssi = apply_filter_chain(&rssi_race_filter_chain, (float)rssi);
+            filtered_dbm = apply_filter_chain(&dbm_race_filter_chain, (float)dbm);
+        } else {
+            filtered_rssi = apply_filter_chain(&rssi_filter_chain, (float)rssi);
+            filtered_dbm = apply_filter_chain(&dbm_filter_chain, (float)dbm);
+        }
         
         // Check for emergency drop conditions
         check_emergency_drop(last_bitrate, filtered_rssi, emergency_rssi_threshold, emergency_bitrate);
@@ -1332,11 +1385,11 @@ int main() {
 #ifdef DEBUG
         // Only show debug output when we read new signal data
         if (loop_counter % 5 == 0) {
-        printf("vlq = %.2f%%\n", vlq);
+            printf("vlq = %.2f%%\n", vlq);
             printf("rssi = %d (filtered: %.1f)\n", rssi, filtered_rssi);
-        printf("adb= %d\n", aDb);
+            printf("adb= %d\n", aDb);
             printf("dbm= %d (filtered: %.1f)\n", dbm, filtered_dbm);
-        printf("current %d\n", currentDb);
+            printf("current %d\n", currentDb);
         }
 #endif
         mspLQ((int)filtered_rssi);
