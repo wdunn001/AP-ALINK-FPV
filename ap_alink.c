@@ -5,6 +5,8 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <semaphore.h>
 
 
 
@@ -20,46 +22,86 @@ typedef struct {
     char mcspath[256];
 } mcs_arg_t;
 
-void *set_mcs_thread(void *arg) {
-    mcs_arg_t *data = (mcs_arg_t *)arg;
-    int bitrateMcs = data->bitrateMcs;
-    char *mcspath = data->mcspath;
-    char cmd[512];
-    if (bitrateMcs >= 1 && bitrateMcs < 3) {
-        system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=30,0,0,30\" > /dev/null 2>&1");
-        snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
-        system(cmd);
-    }
-    else if (bitrateMcs >= 3 && bitrateMcs < 10)  {
-        system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=0,0,0,0\" > /dev/null 2>&1");
-        snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
-        system(cmd);
-    }
-    else {
-        system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=0,0,0,0\" > /dev/null 2>&1");
-        snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
-        system(cmd);
-    }
+// Worker thread infrastructure
+typedef enum {
+    CMD_SET_BITRATE,
+    CMD_SET_MCS
+} cmd_type_t;
 
-    free(arg);
+typedef struct {
+    cmd_type_t type;
+    union {
+        int bitrate_kbps;
+        mcs_arg_t mcs_data;
+    } data;
+} worker_cmd_t;
+
+static pthread_t worker_thread;
+static pthread_mutex_t worker_mutex = PTHREAD_MUTEX_INITIALIZER;
+static sem_t worker_sem;
+static worker_cmd_t pending_cmd;
+static int worker_running = 0;
+
+// Worker thread that processes API calls
+void *worker_thread_func(void *arg) {
+    char cmd[512];
+    
+    while (worker_running) {
+        // Wait for work
+        sem_wait(&worker_sem);
+        
+        pthread_mutex_lock(&worker_mutex);
+        worker_cmd_t cmd_to_process = pending_cmd;
+        pthread_mutex_unlock(&worker_mutex);
+        
+        switch (cmd_to_process.type) {
+            case CMD_SET_BITRATE: {
+                int bitrate_kbps = cmd_to_process.data.bitrate_kbps;
+                snprintf(cmd, sizeof(cmd),
+                         "wget -qO- \"http://localhost/api/v1/set?video0.bitrate=%d\" > /dev/null 2>&1",
+                         bitrate_kbps);
+                system(cmd);
+                break;
+            }
+            case CMD_SET_MCS: {
+                mcs_arg_t *data = &cmd_to_process.data.mcs_data;
+                int bitrateMcs = data->bitrateMcs;
+                char *mcspath = data->mcspath;
+                
+                if (bitrateMcs >= 1 && bitrateMcs < 3) {
+                    system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=30,0,0,30\" > /dev/null 2>&1");
+                    snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
+                    system(cmd);
+                }
+                else if (bitrateMcs >= 3 && bitrateMcs < 10) {
+                    system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=0,0,0,0\" > /dev/null 2>&1");
+                    snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
+                    system(cmd);
+                }
+                else {
+                    system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=0,0,0,0\" > /dev/null 2>&1");
+                    snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
+                    system(cmd);
+                }
+                break;
+            }
+        }
+    }
     return NULL;
 }
 
 
 
 void set_mcs_async(int bitrateMcs, const char *mcspath) {
-    pthread_t thread_id;
-    mcs_arg_t *arg = malloc(sizeof(mcs_arg_t));
-    if (!arg) return;
-
-    arg->bitrateMcs = bitrateMcs;
-    snprintf(arg->mcspath, sizeof(arg->mcspath), "%s", mcspath);
-
-    if (pthread_create(&thread_id, NULL, set_mcs_thread, arg) == 0) {
-        pthread_detach(thread_id);
-    } else {
-        free(arg);
-    }
+    if (!worker_running) return;
+    
+    pthread_mutex_lock(&worker_mutex);
+    pending_cmd.type = CMD_SET_MCS;
+    pending_cmd.data.mcs_data.bitrateMcs = bitrateMcs;
+    snprintf(pending_cmd.data.mcs_data.mcspath, sizeof(pending_cmd.data.mcs_data.mcspath), "%s", mcspath);
+    pthread_mutex_unlock(&worker_mutex);
+    
+    sem_post(&worker_sem);
 }
 
 
@@ -178,32 +220,15 @@ void mspLQ(int rssi_osd) {
 }
 
 
-void *set_bitrate_thread(void *arg) {
-    int bitrate_kbps = *((int *)arg);
-    char command[256];
-    snprintf(command, sizeof(command),
-             "wget -qO- \"http://localhost/api/v1/set?video0.bitrate=%d\" > /dev/null 2>&1",
-             bitrate_kbps);
-    free(arg);
-    system(command);
-    return NULL;
-}
-
 void set_bitrate_async(int bitrate_mbps) {
-    pthread_t thread_id;
-    int *bitrate_kbps = malloc(sizeof(int));
-    if (!bitrate_kbps) {
-        perror("malloc");
-        return;
-    }
-    *bitrate_kbps = bitrate_mbps * 1024;
-
-    if (pthread_create(&thread_id, NULL, set_bitrate_thread, bitrate_kbps) == 0) {
-        pthread_detach(thread_id);
-    } else {
-        free(bitrate_kbps);
-        perror("pthread_create");
-    }
+    if (!worker_running) return;
+    
+    pthread_mutex_lock(&worker_mutex);
+    pending_cmd.type = CMD_SET_BITRATE;
+    pending_cmd.data.bitrate_kbps = bitrate_mbps * 1024;
+    pthread_mutex_unlock(&worker_mutex);
+    
+    sem_post(&worker_sem);
 }
 
 int main() {
@@ -224,6 +249,14 @@ int main() {
     //char rssi_pattern[5] = {0};
 
     config("/etc/ap_alink.conf", &bitrate_max, NIC, &RaceMode);
+    
+    // Initialize worker thread
+    sem_init(&worker_sem, 0, 0);
+    worker_running = 1;
+    if (pthread_create(&worker_thread, NULL, worker_thread_func, NULL) != 0) {
+        perror("Failed to create worker thread");
+        exit(1);
+    }
     
 
     if (strcmp(NIC, "8812eu2") == 0) {
@@ -311,23 +344,15 @@ int main() {
                 set_bitrate_async(bitrate);
                 set_mcs_async(bitrate, driverpath);
                 
-
-    
-    
-    }       
-
-
-                 
-
-
-
-
         fflush(stdout);
-
-
-        
-        
+        usleep(100000);  // 100ms delay for proper loop timing
     }
+    
+    // Cleanup worker thread
+    worker_running = 0;
+    sem_post(&worker_sem);  // Wake up worker to exit
+    pthread_join(worker_thread, NULL);
+    sem_destroy(&worker_sem);
 
     return 0;
 
