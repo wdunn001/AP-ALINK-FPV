@@ -941,22 +941,22 @@ void *worker_thread_func(void *arg) {
             }
             case CMD_SET_MCS: {
                 mcs_arg_t *data = &cmd_to_process.data.mcs_data;
-                int bitrateMcs = data->bitrateMcs;
-                char *mcspath = data->mcspath;
+    int bitrateMcs = data->bitrateMcs;
+    char *mcspath = data->mcspath;
                 
-                if (bitrateMcs >= 1 && bitrateMcs < 3) {
+    if (bitrateMcs >= 1 && bitrateMcs < 3) {
                     http_get("/api/v1/set?fpv.roiQp=30,0,0,30");
-                    snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
+        snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
                     (void)system(cmd);
-                }
+    }
                 else if (bitrateMcs >= 3 && bitrateMcs < 10) {
                     http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
-                    snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
+        snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
                     (void)system(cmd);
-                }
-                else {
+    }
+    else {
                     http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
-                    snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
+        snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
                     (void)system(cmd);
                 }
                 break;
@@ -1097,15 +1097,15 @@ int get_dbm() {
             if (field_count == 2) {
                 // Convert signal level to dBm (it's in centi-dBm, so divide by 100)
                 dbm = atoi(token) / 100;
-                break;
-            }
+                    break;
+                }
             token = strtok(NULL, " \t");
             field_count++;
+            }
         }
-    }
 
 cleanup:
-    fclose(fp);
+        fclose(fp);
     return dbm;
 }
 
@@ -1127,11 +1127,11 @@ int get_rssi(const char *readcmd) {
         if (fp != NULL) {
             fclose(fp);
         }
-        fp = fopen(path, "r");
-        if (!fp) {
-            perror("fopen");
-            return rssi_percent;
-        }
+    fp = fopen(path, "r");
+    if (!fp) {
+        perror("fopen");
+        return rssi_percent;
+    }
         strcpy(last_path, path);
     } else {
         // Rewind to beginning for fresh read
@@ -1305,10 +1305,11 @@ int main() {
         
         // Only read signal data every 5 frames to reduce I/O overhead
         // This gives us frame-synced control with reduced signal reading frequency
+        // At 120Hz frame rate: 120Hz control loop, 24Hz signal sampling (optimal for video quality)
         if (loop_counter % 5 == 0) {
-            currentDb = dbm - aDb;
+        currentDb = dbm - aDb;
             dbm = get_dbm();
-            aDb = dbm; 
+        aDb = dbm; 
             rssi = get_rssi(driverpath);
             
         // Apply filter chains to smooth the signals
@@ -1331,11 +1332,11 @@ int main() {
 #ifdef DEBUG
         // Only show debug output when we read new signal data
         if (loop_counter % 5 == 0) {
-            printf("vlq = %.2f%%\n", vlq);
+        printf("vlq = %.2f%%\n", vlq);
             printf("rssi = %d (filtered: %.1f)\n", rssi, filtered_rssi);
-            printf("adb= %d\n", aDb);
+        printf("adb= %d\n", aDb);
             printf("dbm= %d (filtered: %.1f)\n", dbm, filtered_dbm);
-            printf("current %d\n", currentDb);
+        printf("current %d\n", currentDb);
         }
 #endif
         mspLQ((int)filtered_rssi);

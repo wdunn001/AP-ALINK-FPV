@@ -10,8 +10,8 @@ A sophisticated FPV link adaptation system for OpenIPC-based devices, featuring 
 - **PID Controller**: Smooth, stable bitrate transitions with configurable gains
 - **Asymmetric Cooldown**: Prevents oscillation with faster decreases and slower increases
 - **Emergency Drop Logic**: Immediate response to critical signal loss
-- **Real-time Priority**: Ultra-low latency for racing applications
-- **Frame-sync Timing**: Synchronized with video frame rates for optimal quality
+- **Real-time Priority**: SCHED_FIFO scheduling for deterministic timing
+- **Frame-sync Timing**: Synchronized control at 120Hz with 24Hz signal sampling for optimal video quality
 
 ### **Signal Processing**
 - **RSSI Analysis**: Real-time signal strength monitoring
@@ -22,7 +22,7 @@ A sophisticated FPV link adaptation system for OpenIPC-based devices, featuring 
 
 ### **Performance Optimizations**
 - **Worker Threads**: Asynchronous API calls to prevent blocking
-- **Reduced I/O**: Optimized signal reading frequency
+- **Reduced I/O**: Optimized signal reading frequency (24Hz sampling)
 - **HTTP Optimization**: Raw socket implementation instead of wget
 - **Memory Efficiency**: Minimal memory footprint
 
@@ -58,16 +58,17 @@ wificard=8812eu2
 LowLatency=0
 fps=120
 
-# Filter Configuration
-# Filter Types: 0=Kalman Filter, 1=Low-Pass Filter, 2=Mode Filter, 3=Derivative Filter, 4=2-Pole LPF
-rssi_filter_type=0
-dbm_filter_type=0
+# Filter Chain Configuration
+# Format: comma-separated filter types (0=Kalman, 1=Low-Pass, 2=Mode, 3=Derivative, 4=2-Pole LPF)
+# Examples: "0" (single Kalman), "2,0" (Mode->Kalman), "1,4" (Low-Pass->2-Pole LPF)
+rssi_filter_chain=0
+dbm_filter_chain=0
 
-# Low-Pass Filter Settings (only used when filter_type=1 or 4)
+# Low-Pass Filter Settings (used by filter types 1 and 4)
 lpf_cutoff_freq=2.0
 lpf_sample_freq=10.0
 
-# Kalman Filter Parameters (only used when filter_type=0)
+# Kalman Filter Parameters (used by filter type 0)
 # Process variance - how much the signal is expected to change (lower = more stable)
 kalman_rssi_process=0.00001
 kalman_dbm_process=0.00001
@@ -103,9 +104,9 @@ pid_kd=0.4
 
 ### **Configuration Parameters Explained**
 
-#### **Filter Types**
-- **`rssi_filter_type`**: Filter type for RSSI signal (0=Kalman, 1=Low-Pass, 2=Mode, 3=Derivative, 4=2-Pole LPF)
-- **`dbm_filter_type`**: Filter type for dBm signal (0=Kalman, 1=Low-Pass, 2=Mode, 3=Derivative, 4=2-Pole LPF)
+#### **Filter Chain Configuration**
+- **`rssi_filter_chain`**: Comma-separated filter chain for RSSI signal (e.g., "2,0" for Mode→Kalman)
+- **`dbm_filter_chain`**: Comma-separated filter chain for dBm signal (e.g., "1" for single Low-Pass)
 
 #### **Advanced Filter Options**
 - **Kalman Filter (0)**: Sophisticated adaptive filtering with optimal noise rejection
@@ -116,7 +117,7 @@ pid_kd=0.4
 
 #### **Low-Pass Filter Settings**
 - **`lpf_cutoff_freq`**: Cutoff frequency in Hz (lower = more smoothing, used by filter types 1 and 4)
-- **`lpf_sample_freq`**: Sample frequency in Hz (should match your update rate, used by filter types 1 and 4)
+- **`lpf_sample_freq`**: Sample frequency in Hz (should match signal sampling rate, used by filter types 1 and 4)
 
 #### **Kalman Filter Settings**
 - **`kalman_rssi_process`**: Process variance for RSSI (lower = more stable)
@@ -186,26 +187,26 @@ pid_kd=0.4
 
 #### **Racing Setup**
 ```ini
-rssi_filter_type=1    # Low-Pass for speed
-dbm_filter_type=1     # Low-Pass for speed
+rssi_filter_chain=1    # Low-Pass for speed
+dbm_filter_chain=1     # Low-Pass for speed
 ```
 
 #### **Noisy Environment**
 ```ini
-rssi_filter_type=2    # Mode for noise rejection
-dbm_filter_type=2     # Mode for stability
+rssi_filter_chain=2,0  # Mode→Kalman for noise rejection
+dbm_filter_chain=2,0    # Mode→Kalman for stability
 ```
 
 #### **Professional Setup**
 ```ini
-rssi_filter_type=4    # 2-Pole LPF for quality
-dbm_filter_type=0     # Kalman for dBm stability
+rssi_filter_chain=4,0  # 2-Pole LPF→Kalman for quality
+dbm_filter_chain=0      # Kalman for dBm stability
 ```
 
 #### **Trend Analysis**
 ```ini
-rssi_filter_type=3    # Derivative for trends
-dbm_filter_type=0     # Kalman for dBm stability
+rssi_filter_chain=3,0  # Derivative→Kalman for trends
+dbm_filter_chain=0      # Kalman for dBm stability
 ```
 
 ## Usage Scenarios
@@ -213,8 +214,8 @@ dbm_filter_type=0     # Kalman for dBm stability
 ### **Racing Mode (Low Latency)**
 ```ini
 LowLatency=1
-rssi_filter_type=1
-dbm_filter_type=1
+rssi_filter_chain=1
+dbm_filter_chain=1
 lpf_cutoff_freq=5.0
 strict_cooldown_ms=100
 pid_kp=1.5
@@ -223,8 +224,8 @@ pid_kp=1.5
 ### **Long Range (Stability)**
 ```ini
 LowLatency=0
-rssi_filter_type=0
-dbm_filter_type=0
+rssi_filter_chain=0
+dbm_filter_chain=0
 kalman_rssi_process=0.000001
 up_cooldown_ms=5000
 pid_kp=0.8
@@ -232,27 +233,27 @@ pid_kp=0.8
 
 ### **Mixed Approach**
 ```ini
-rssi_filter_type=0    # Kalman for RSSI (more sophisticated)
-dbm_filter_type=1     # Low-pass for dBm (simpler, faster)
+rssi_filter_chain=0    # Kalman for RSSI (more sophisticated)
+dbm_filter_chain=1     # Low-pass for dBm (simpler, faster)
 ```
 
 ### **Noisy Environment (Mode Filter)**
 ```ini
-rssi_filter_type=2    # Mode filter for excellent noise rejection
-dbm_filter_type=2     # Mode filter for stable median values
+rssi_filter_chain=2,0  # Mode→Kalman for excellent noise rejection
+dbm_filter_chain=2,0   # Mode→Kalman for stable median values
 ```
 
 ### **Trend Detection (Derivative Filter)**
 ```ini
-rssi_filter_type=3    # Derivative filter for trend analysis
-dbm_filter_type=0    # Kalman for dBm stability
+rssi_filter_chain=3,0  # Derivative→Kalman for trend analysis
+dbm_filter_chain=0     # Kalman for dBm stability
 ```
 
 ### **Professional Setup (2-Pole LPF)**
 ```ini
-rssi_filter_type=4    # 2-Pole LPF for professional filtering
-dbm_filter_type=4     # 2-Pole LPF with Butterworth response
-lpf_cutoff_freq=1.5   # Lower cutoff for more smoothing
+rssi_filter_chain=4,0  # 2-Pole LPF→Kalman for professional filtering
+dbm_filter_chain=4,0   # 2-Pole LPF→Kalman with Butterworth response
+lpf_cutoff_freq=1.5    # Lower cutoff for more smoothing
 ```
 
 ## Running the Application
@@ -303,6 +304,7 @@ Derivative filters initialized
 PID Controller initialized: Kp=1.00, Ki=0.05, Kd=0.40
 Real-time priority set successfully (SCHED_FIFO, priority 50)
 Frame-sync initialized: 120 FPS (8.33 ms interval)
+Signal sampling: 24Hz (every 5th frame)
 
 vlq = 85.23%
 rssi = 45 (filtered: 44.8)
@@ -352,24 +354,24 @@ lsmod | grep 88
 ### **Performance Tuning**
 
 #### **For Racing**
-- Use low-pass filters (`filter_type=1`) or derivative filters (`filter_type=3`)
+- Use low-pass filters (`rssi_filter_chain=1`) or derivative filters (`rssi_filter_chain=3,0`)
 - Higher cutoff frequency (`lpf_cutoff_freq=5.0`)
 - Shorter cooldowns (`strict_cooldown_ms=100`)
 - Higher PID gains (`pid_kp=1.5`)
 
 #### **For Long Range**
-- Use Kalman filters (`filter_type=0`) or 2-pole LPF (`filter_type=4`)
+- Use Kalman filters (`rssi_filter_chain=0`) or 2-pole LPF (`rssi_filter_chain=4,0`)
 - Lower process variance (`kalman_rssi_process=0.000001`)
 - Longer cooldowns (`up_cooldown_ms=5000`)
 - Lower PID gains (`pid_kp=0.8`)
 
 #### **For Noisy Environments**
-- Use mode filters (`filter_type=2`) for excellent noise rejection
+- Use mode filters (`rssi_filter_chain=2,0`) for excellent noise rejection
 - Standard cooldowns (`strict_cooldown_ms=200`)
 - Moderate PID gains (`pid_kp=1.0`)
 
 #### **For Professional Applications**
-- Use 2-pole LPF (`filter_type=4`) for Butterworth response
+- Use 2-pole LPF (`rssi_filter_chain=4,0`) for Butterworth response
 - Lower cutoff frequency (`lpf_cutoff_freq=1.5`)
 - Longer cooldowns (`up_cooldown_ms=3000`)
 - Balanced PID gains (`pid_kp=1.0`)
@@ -444,7 +446,8 @@ lsmod | grep 88
 - **Signal Processing**: < 1ms
 - **Filter Application**: < 0.1ms
 - **API Calls**: Asynchronous (non-blocking)
-- **Total Loop Time**: ~8ms (120 FPS)
+- **Control Loop**: 120Hz (frame-synchronized)
+- **Signal Sampling**: 24Hz (every 5th frame)
 
 ### **CPU Usage**
 - **Low-Pass Filter**: ~0.1% CPU
