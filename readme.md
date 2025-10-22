@@ -129,77 +129,121 @@ control_algorithm=1
 
 ### **Configuration Parameters Explained**
 
+The configuration file is now organized into logical sections for easier navigation and tuning:
+
 #### **Basic Settings**
-- **`race_mode`**: Enable racing mode (1=ON, 0=OFF) - uses racing_fps and racing-specific settings
-- **`fps`**: Normal mode frame rate (used when race_mode=0)
-- **`racing_fps`**: Racing mode frame rate (used when race_mode=1)
+- **`bitrate_max`**: Maximum bitrate in Mbps (1-19)
+- **`wificard`**: WiFi card identifier (e.g., "8812eu2")
+- **`race_mode`**: Enable racing mode (0=normal, 1=racing)
+- **`fps`**: Video frame rate (typically 60-120)
 
-#### **Filter Chain Configuration**
-- **`rssi_filter_chain`**: Comma-separated filter chain for RSSI signal (e.g., "2,0" for Mode→Kalman)
-- **`dbm_filter_chain`**: Comma-separated filter chain for dBm signal (e.g., "1" for single Low-Pass)
+#### **Video Quality Control (QP Delta)**
+- **`qp_delta_low`**: QP delta for low bitrate (MCS 1-2) - Default: 15 (was 30)
+- **`qp_delta_medium`**: QP delta for medium bitrate (MCS 3-9) - Default: 5
+- **`qp_delta_high`**: QP delta for high bitrate (MCS 10+) - Default: 0
 
-#### **Racing Mode Filter Chain Configuration**
-- **`racing_rssi_filter_chain`**: Filter chain for RSSI when race_mode=1 (default: "1" for Low-Pass)
-- **`racing_dbm_filter_chain`**: Filter chain for dBm when race_mode=1 (default: "1" for Low-Pass)
+#### **Signal Processing & Filters**
+- **`rssi_filter_chain`**: RSSI filter chain configuration
+- **`dbm_filter_chain`**: dBm filter chain configuration
+- **`racing_rssi_filter_chain`**: Racing mode RSSI filter chain
+- **`racing_dbm_filter_chain`**: Racing mode dBm filter chain
+- **`lpf_cutoff_freq`**: Low-pass filter cutoff frequency
+- **`lpf_sample_freq`**: Low-pass filter sample frequency
+- **`kalman_rssi_process`**: Kalman filter process variance for RSSI
+- **`kalman_dbm_process`**: Kalman filter process variance for dBm
+- **`kalman_rssi_measure`**: Kalman filter measurement variance for RSSI
+- **`kalman_dbm_measure`**: Kalman filter measurement variance for dBm
 
-#### **Advanced Filter Options**
-- **Kalman Filter (0)**: Sophisticated adaptive filtering with optimal noise rejection
-- **Low-Pass Filter (1)**: Simple exponential moving average for fast response
-- **Mode Filter (2)**: ArduPilot-style median-like filtering with alternating sample dropping
-- **Derivative Filter (3)**: Savitzky-Golay trend detection with smooth derivative calculation
-- **2-Pole Low-Pass Filter (4)**: Professional biquad filter with Butterworth response
+#### **Signal Sampling & Timing**
+- **`signal_sampling_interval`**: Frames between signal readings (legacy)
+- **`signal_sampling_freq_hz`**: Independent signal sampling frequency (Hz)
 
-#### **Low-Pass Filter Settings**
-- **`lpf_cutoff_freq`**: Cutoff frequency in Hz (lower = more smoothing, used by filter types 1 and 4)
-- **`lpf_sample_freq`**: Sample frequency in Hz (should match signal sampling rate, used by filter types 1 and 4)
-
-#### **Kalman Filter Settings**
-- **`kalman_rssi_process`**: Process variance for RSSI (lower = more stable)
-- **`kalman_rssi_measure`**: Measurement variance for RSSI (higher = more noisy)
-- **`kalman_dbm_process`**: Process variance for dBm
-- **`kalman_dbm_measure`**: Measurement variance for dBm
-
-#### **Cooldown Settings**
+#### **Bitrate Control & Cooldowns**
 - **`strict_cooldown_ms`**: Minimum time between any bitrate changes
 - **`up_cooldown_ms`**: Additional time required before increasing bitrate
 - **`min_change_percent`**: Minimum percentage change to trigger adjustment
+- **`emergency_cooldown_ms`**: Time between bitrate decreases
+- **`control_algorithm`**: Control algorithm (0=PID, 1=Simple FIFO)
 
-#### **Emergency Settings**
+#### **Emergency & Safety Settings**
 - **`emergency_rssi_threshold`**: RSSI threshold for emergency drop (legacy - now used as fallback)
-- **`hardware_rssi_offset`**: Hardware-specific RSSI offset for calibration
 - **`emergency_bitrate`**: Bitrate to drop to in emergency
+- **`hardware_rssi_offset`**: Hardware-specific RSSI offset for calibration
 
-#### **PID Controller**
+#### **PID Controller (Advanced Users)**
 - **`pid_kp`**: Proportional gain (immediate response)
 - **`pid_ki`**: Integral gain (steady-state error correction)
-- **`pid_kd`**: Derivative gain (overshoot prevention)
+- **`pid_kd`**: Derivative gain (overshoot reduction)
 
-#### **Racing Mode Configuration**
-- **`racing_video_resolution`**: Video resolution for racing mode (e.g., "1280x720", "1920x1080")
-- **`racing_exposure`**: Camera exposure setting for racing mode (lower = faster shutter)
-- **`racing_fps`**: Frame rate for racing mode (separate from normal `fps` setting)
+#### **Racing Mode Overrides**
+- **`racing_video_resolution`**: Video resolution for racing mode
+- **`racing_exposure`**: Camera exposure for racing mode
+- **`racing_fps`**: Frame rate for racing mode
 
-#### **Signal Sampling Configuration**
-- **`signal_sampling_interval`**: Number of frames between signal readings (legacy, higher = less CPU usage, lower = more responsive)
-  - At 120 FPS: 1=120Hz sampling, 2=60Hz, 3=40Hz, 5=24Hz, 10=12Hz
-  - Default: 5 (24Hz sampling at 120 FPS)
-- **`signal_sampling_freq_hz`**: Independent signal sampling frequency in Hz (not tied to frame rate)
-  - Higher values = more responsive to signal changes, more CPU usage
-  - Lower values = less CPU usage, less responsive to signal changes
-  - Default: 50Hz (20ms intervals)
-  - Recommended: 50-100Hz for racing, 20-50Hz for general use
+### **Configuration File Organization**
 
-#### **Emergency Cooldown Configuration**
-- **`emergency_cooldown_ms`**: Time between bitrate decreases (lower = faster response to signal drops)
-  - At 120 FPS: 50ms=6 frames, 25ms=3 frames, 8ms=1 frame
-  - Default: 50ms (6 frames at 120 FPS)
-  - For ultra-low latency racing: use 8-25ms (1-3 frames)
+The configuration file (`ap_alink.conf`) is now organized into logical sections with clear headers:
 
-#### **Control Algorithm Configuration**
-- **`control_algorithm`**: Choose between PID controller and Simple FIFO
-  - **0 = PID Controller**: Smooth transitions, more complex, higher CPU usage
-  - **1 = Simple FIFO**: Fast, direct, more performant, lower CPU usage
-  - **Default: 1** (Simple FIFO for better performance)
+```
+# =============================================================================
+# BASIC SETTINGS
+# =============================================================================
+bitrate_max=19
+wificard=8812eu2
+race_mode=0
+fps=120
+
+# =============================================================================
+# VIDEO QUALITY CONTROL (QP Delta)
+# =============================================================================
+qp_delta_low=15
+qp_delta_medium=5
+qp_delta_high=0
+
+# =============================================================================
+# SIGNAL PROCESSING & FILTERS
+# =============================================================================
+rssi_filter_chain=0
+dbm_filter_chain=0
+# ... more filter settings
+
+# =============================================================================
+# SIGNAL SAMPLING & TIMING
+# =============================================================================
+signal_sampling_freq_hz=50
+# ... more timing settings
+
+# =============================================================================
+# BITRATE CONTROL & COOLDOWNS
+# =============================================================================
+strict_cooldown_ms=200
+# ... more control settings
+
+# =============================================================================
+# EMERGENCY & SAFETY SETTINGS
+# =============================================================================
+emergency_rssi_threshold=30
+hardware_rssi_offset=0
+# ... more safety settings
+
+# =============================================================================
+# PID CONTROLLER (Advanced Users)
+# =============================================================================
+pid_kp=1.0
+# ... more PID settings
+
+# =============================================================================
+# RACING MODE OVERRIDES CONFIGURATION
+# =============================================================================
+racing_video_resolution=1280x720
+# ... more racing settings
+```
+
+**Benefits of this organization:**
+- **Easy Navigation**: Find settings quickly by section
+- **Logical Grouping**: Related settings are together
+- **Clear Headers**: Section dividers make it easy to scan
+- **Progressive Complexity**: Basic settings first, advanced settings last
 
 #### **Dynamic RSSI Thresholds (MCS-Based)**
 
@@ -815,6 +859,34 @@ lsmod | grep 88
 
 ## Changelog
 
+### **v2.2 - Configuration & Documentation Update**
+
+#### **Major Improvements:**
+- **Enhanced QP Delta Documentation**: Comprehensive layman's explanation with real-world analogies
+- **Reorganized Configuration File**: Logical grouping of settings for easier navigation and tuning
+- **Dynamic RSSI Thresholds**: MCS-based thresholds that adapt to current modulation scheme
+- **Hardware Calibration System**: Configurable RSSI offset for different DIY builds
+
+#### **Configuration File Improvements:**
+- **Logical Organization**: Settings grouped by function (Basic, Video Quality, Signal Processing, etc.)
+- **Clear Section Headers**: Easy navigation with descriptive section dividers
+- **QP Delta Prominence**: Video quality settings moved to top for importance
+- **Racing Mode Consolidation**: All racing-related settings in dedicated section
+
+#### **Documentation Enhancements:**
+- **QP Delta Explained**: Suitcase packing analogy for compression concepts
+- **Tuning Guides**: Specific recommendations for racing, long range, and balanced use
+- **Hardware Considerations**: DIY build calibration guidance
+- **Configuration Tables**: Clear reference for different use cases
+
+#### **Technical Improvements:**
+- **Function Declarations**: Fixed compilation warnings for dynamic RSSI functions
+- **MCS Lookup Table**: Based on 802.11n/ac standards with 10 MCS levels
+- **Automatic Threshold Calculation**: Real-time adaptation to current bitrate/MCS
+- **Enhanced Debug Output**: Shows current MCS and calculated threshold
+
+---
+
 ### **v2.1 - Dynamic RSSI Thresholds Release**
 
 #### **Major New Features:**
@@ -893,6 +965,56 @@ lsmod | grep 88
 ## License
 
 This project is completely free to use for everyone. No restrictions apply.
+
+## Key Features Summary
+
+✅ **Dynamic RSSI Thresholds** - MCS-based thresholds that adapt to current modulation  
+✅ **Hardware Calibration** - Configurable RSSI offset for different DIY builds  
+✅ **Memory-Mapped I/O** - 20-200x faster signal reading with zero overhead  
+✅ **Configurable Signal Sampling** - Independent frequency from frame rate  
+✅ **Emergency Cooldown System** - Ultra-fast bitrate drops (8-50ms configurable)  
+✅ **Control Algorithm Choice** - PID vs Simple FIFO for different use cases  
+✅ **QP Delta Configuration** - Fine-tune video quality vs compression  
+✅ **Organized Configuration** - Logical grouping for easy navigation and tuning  
+✅ **Comprehensive Documentation** - Layman's explanations with real-world analogies
+
+## Quick Start Guide
+
+### **For Racing (Low Latency):**
+```ini
+race_mode=1
+racing_fps=120
+signal_sampling_freq_hz=100
+emergency_cooldown_ms=8
+control_algorithm=1
+qp_delta_low=10
+qp_delta_medium=3
+qp_delta_high=0
+```
+
+### **For Long Range (Stability):**
+```ini
+race_mode=0
+fps=60
+signal_sampling_freq_hz=30
+emergency_cooldown_ms=50
+control_algorithm=1
+qp_delta_low=25
+qp_delta_medium=10
+qp_delta_high=5
+```
+
+### **For Balanced Performance:**
+```ini
+race_mode=0
+fps=120
+signal_sampling_freq_hz=50
+emergency_cooldown_ms=25
+control_algorithm=1
+qp_delta_low=15
+qp_delta_medium=5
+qp_delta_high=0
+```
 
 ## 🎥 Real-World Testing
 
