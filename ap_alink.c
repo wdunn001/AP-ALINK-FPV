@@ -1283,10 +1283,10 @@ int main() {
         (void)system("sysctl -w net.core.wmem_max=65536");
         (void)system("ifconfig wlan0 txqueuelen 100");
         (void)system("sysctl -w net.core.netdev_max_backlog=64");
-        //SET 960x720120FPS
-        (void)system("wget -qO- \"http://localhost/api/v1/set?video0.size=1280x720\" > /dev/null 2>&1");
-        (void)system("wget -qO- \"http://localhost/api/v1/set?video0.fps=120\" > /dev/null 2>&1");
-        (void)system("wget -qO- \"http://localhost/api/v1/set?isp.exposure=11\" > /dev/null 2>&1");                
+        //SET 1280x720@120FPS with optimized HTTP calls
+        http_get("/api/v1/set?video0.size=1280x720");
+        http_get("/api/v1/set?video0.fps=120");
+        http_get("/api/v1/set?isp.exposure=11");                
         
     } else {
         printf("racemode disable\n");
