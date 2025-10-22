@@ -7,11 +7,48 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <semaphore.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
 
 
 
 void autopower() {
     system("iw wlan0 set tx power auto");
+}
+
+// Raw HTTP GET implementation (much faster than wget)
+int http_get(const char *path) {
+    int s;
+    struct sockaddr_in addr;
+    char req[256];
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+
+    if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0) return -1;
+
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(80);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(s);
+        return -1;
+    }
+
+    snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\n\r\n", path);
+    if (send(s, req, strlen(req), 0) < 0) {
+        close(s);
+        return -1;
+    }
+
+    char buf[64];
+    while (recv(s, buf, sizeof(buf), 0) > 0);
+
+    close(s);
+    return 0;
 }
 
 
@@ -57,10 +94,9 @@ void *worker_thread_func(void *arg) {
         switch (cmd_to_process.type) {
             case CMD_SET_BITRATE: {
                 int bitrate_kbps = cmd_to_process.data.bitrate_kbps;
-                snprintf(cmd, sizeof(cmd),
-                         "wget -qO- \"http://localhost/api/v1/set?video0.bitrate=%d\" > /dev/null 2>&1",
-                         bitrate_kbps);
-                system(cmd);
+                char path[128];
+                snprintf(path, sizeof(path), "/api/v1/set?video0.bitrate=%d", bitrate_kbps);
+                http_get(path);
                 break;
             }
             case CMD_SET_MCS: {
@@ -69,17 +105,17 @@ void *worker_thread_func(void *arg) {
                 char *mcspath = data->mcspath;
                 
                 if (bitrateMcs >= 1 && bitrateMcs < 3) {
-                    system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=30,0,0,30\" > /dev/null 2>&1");
+                    http_get("/api/v1/set?fpv.roiQp=30,0,0,30");
                     snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
                     system(cmd);
                 }
                 else if (bitrateMcs >= 3 && bitrateMcs < 10) {
-                    system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=0,0,0,0\" > /dev/null 2>&1");
+                    http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
                     snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
                     system(cmd);
                 }
                 else {
-                    system("wget -qO- \"http://localhost/api/v1/set?fpv.roiQp=0,0,0,0\" > /dev/null 2>&1");
+                    http_get("/api/v1/set?fpv.roiQp=0,0,0,0");
                     snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
                     system(cmd);
                 }
@@ -208,7 +244,7 @@ int get_rssi(const char *readcmd) {
     while (fgets(buffer, sizeof(buffer), fp)) {
         char *pos = strstr(buffer, "rssi");
         if (pos) {
-            // Tolère espaces optionnels autour du ':'
+            // Allows optional spaces around the ':'
             if (sscanf(pos, "rssi : %d %%", &rssi_percent) != 1) {
                 sscanf(pos, "rssi: %d %%", &rssi_percent);
             }
