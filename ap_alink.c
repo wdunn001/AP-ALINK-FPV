@@ -134,6 +134,10 @@ float apply_filter_chain(filter_chain_t *chain, float sample);
 void parse_filter_chain(const char *config_str, filter_chain_t *chain);
 void reset_filter_chain(filter_chain_t *chain);
 
+// Dynamic RSSI threshold functions
+int get_dynamic_rssi_threshold(int current_mcs);
+int bitrate_to_mcs(int bitrate_mbps);
+
 // Global Kalman filters for different signals
 static kalman_filter_t rssi_filter = {
     .estimate = 50.0f,           // Initial RSSI estimate (50%)
@@ -837,9 +841,17 @@ bool should_change_bitrate(int new_bitrate, int current_bitrate,
 // Emergency drop logic for sudden signal loss
 void check_emergency_drop(int current_bitrate, float filtered_rssi, 
                          int emergency_rssi_threshold, int emergency_bitrate) {
-    if (filtered_rssi < emergency_rssi_threshold && current_bitrate > emergency_bitrate) {
-        printf("EMERGENCY DROP: RSSI=%.1f, bitrate=%d->%d\n", 
-               filtered_rssi, current_bitrate, emergency_bitrate);
+    // Calculate dynamic RSSI threshold based on current MCS
+    int current_mcs = bitrate_to_mcs(current_bitrate);
+    int dynamic_threshold = get_dynamic_rssi_threshold(current_mcs);
+    
+    // Use the more conservative threshold (lower value = more sensitive)
+    int effective_threshold = (dynamic_threshold < emergency_rssi_threshold) ? 
+                             dynamic_threshold : emergency_rssi_threshold;
+    
+    if (filtered_rssi < effective_threshold && current_bitrate > emergency_bitrate) {
+        printf("EMERGENCY DROP: RSSI=%.1f (threshold=%d, MCS=%d), bitrate=%d->%d\n", 
+               filtered_rssi, effective_threshold, current_mcs, current_bitrate, emergency_bitrate);
         
         // Set emergency bitrate
         char command[128];
@@ -960,9 +972,61 @@ static worker_cmd_t pending_cmd;
 static int worker_running = 0;
 
 // Global QP delta configuration (set by main thread, read by worker thread)
-static int global_qp_delta_low = 15;
-static int global_qp_delta_medium = 5;
+static int global_qp_delta_low = 0;
+static int global_qp_delta_medium = 0;
 static int global_qp_delta_high = 0;
+
+// MCS to RSSI threshold lookup table (based on 802.11n/ac standards)
+// Values are minimum RSSI thresholds for reliable operation at each MCS
+static const int mcs_rssi_thresholds[] = {
+    -82,  // MCS 0 (BPSK 1/2)   - Most robust
+    -79,  // MCS 1 (QPSK 1/2)
+    -77,  // MCS 2 (QPSK 3/4)
+    -74,  // MCS 3 (16-QAM 1/2)
+    -70,  // MCS 4 (16-QAM 3/4)
+    -66,  // MCS 5 (64-QAM 2/3)
+    -65,  // MCS 6 (64-QAM 3/4)
+    -64,  // MCS 7 (64-QAM 5/6)
+    -59,  // MCS 8 (256-QAM 3/4) - VHT
+    -57   // MCS 9 (256-QAM 5/6) - VHT, least robust
+};
+
+// Hardware-specific RSSI offset (configurable for different DIY builds)
+static int hardware_rssi_offset = 0;
+
+// Calculate dynamic RSSI threshold based on current MCS
+int get_dynamic_rssi_threshold(int current_mcs) {
+    // Clamp MCS to valid range
+    if (current_mcs < 0) current_mcs = 0;
+    if (current_mcs >= 10) current_mcs = 9;
+    
+    // Get base threshold from lookup table
+    int base_threshold = mcs_rssi_thresholds[current_mcs];
+    
+    // Apply hardware-specific offset
+    int dynamic_threshold = base_threshold + hardware_rssi_offset;
+    
+    // Add safety margin (3 dBm) for emergency drop
+    dynamic_threshold += 3;
+    
+    return dynamic_threshold;
+}
+
+// Convert bitrate to approximate MCS (simplified mapping)
+int bitrate_to_mcs(int bitrate_mbps) {
+    // Simplified mapping based on typical bitrates
+    // This should be calibrated for your specific hardware
+    if (bitrate_mbps <= 1) return 0;      // MCS 0
+    else if (bitrate_mbps <= 2) return 1; // MCS 1
+    else if (bitrate_mbps <= 3) return 2; // MCS 2
+    else if (bitrate_mbps <= 4) return 3; // MCS 3
+    else if (bitrate_mbps <= 6) return 4; // MCS 4
+    else if (bitrate_mbps <= 8) return 5; // MCS 5
+    else if (bitrate_mbps <= 10) return 6; // MCS 6
+    else if (bitrate_mbps <= 12) return 7; // MCS 7
+    else if (bitrate_mbps <= 15) return 8; // MCS 8
+    else return 9; // MCS 9 (highest)
+}
 
 // Worker thread that processes API calls
 void *worker_thread_func(void *arg) {
@@ -1051,7 +1115,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
              int *signal_sampling_interval, unsigned long *emergency_cooldown,
              int *control_algorithm, int *qp_delta_low, int *qp_delta_medium, int *qp_delta_high,
-             int *signal_sampling_freq_hz) {
+             int *signal_sampling_freq_hz, int *hardware_rssi_offset) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1187,6 +1251,10 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         }
         if (strncmp(line, "signal_sampling_freq_hz=", 24) == 0) {
             sscanf(line + 24, "%d", signal_sampling_freq_hz);
+            continue;
+        }
+        if (strncmp(line, "hardware_rssi_offset=", 21) == 0) {
+            sscanf(line + 21, "%d", hardware_rssi_offset);
             continue;
         }
     }
@@ -1421,6 +1489,9 @@ int main() {
     int signal_sampling_interval = 5;               // Default: sample every 5 frames (legacy)
     int signal_sampling_freq_hz = 50;               // Default: 50Hz signal sampling (independent of frame rate)
 
+    // Hardware-specific RSSI offset configuration
+    int hardware_rssi_offset_config = 0;                   // Default: no offset (calibrate for your hardware)
+
     // Emergency cooldown configuration
     unsigned long emergency_cooldown_ms = EMERGENCY_COOLDOWN_MS;  // Default: 50ms
 
@@ -1443,12 +1514,16 @@ int main() {
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
            &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
-           &qp_delta_low, &qp_delta_medium, &qp_delta_high, &signal_sampling_freq_hz);
+           &qp_delta_low, &qp_delta_medium, &qp_delta_high, &signal_sampling_freq_hz,
+           &hardware_rssi_offset_config);
     
     // Set global QP delta values for worker thread
     global_qp_delta_low = qp_delta_low;
     global_qp_delta_medium = qp_delta_medium;
     global_qp_delta_high = qp_delta_high;
+    
+    // Set global hardware RSSI offset
+    hardware_rssi_offset = hardware_rssi_offset_config;
     
     // Parse and configure filter chains
     parse_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
@@ -1495,6 +1570,8 @@ int main() {
     
     printf("Signal sampling frequency: %d Hz (%.2f ms interval)\n", 
            signal_sampling_freq_hz, signal_sampling_interval_ns / 1000000.0);
+    printf("Hardware RSSI offset: %d dBm\n", hardware_rssi_offset_config);
+    printf("Dynamic RSSI thresholds enabled (MCS-based)\n");
     
     // Initialize worker thread
     sem_init(&worker_sem, 0, 0);

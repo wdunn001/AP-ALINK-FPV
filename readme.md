@@ -165,7 +165,8 @@ control_algorithm=1
 - **`min_change_percent`**: Minimum percentage change to trigger adjustment
 
 #### **Emergency Settings**
-- **`emergency_rssi_threshold`**: RSSI threshold for emergency drop
+- **`emergency_rssi_threshold`**: RSSI threshold for emergency drop (legacy - now used as fallback)
+- **`hardware_rssi_offset`**: Hardware-specific RSSI offset for calibration
 - **`emergency_bitrate`**: Bitrate to drop to in emergency
 
 #### **PID Controller**
@@ -200,12 +201,84 @@ control_algorithm=1
   - **1 = Simple FIFO**: Fast, direct, more performant, lower CPU usage
   - **Default: 1** (Simple FIFO for better performance)
 
+#### **Dynamic RSSI Thresholds (MCS-Based)**
+
+The system now uses **dynamic RSSI thresholds** based on the current Modulation and Coding Scheme (MCS), addressing the fact that different modulations require different signal strengths:
+
+- **MCS 0 (BPSK 1/2)**: RSSI threshold -79 dBm (most robust)
+- **MCS 7 (64-QAM 5/6)**: RSSI threshold -61 dBm (less robust)
+- **MCS 9 (256-QAM 5/6)**: RSSI threshold -54 dBm (least robust)
+
+**Hardware Calibration:**
+- **`hardware_rssi_offset`**: Calibrate for your specific DIY build
+  - **Positive values**: More sensitive (lower threshold)
+  - **Negative values**: Less sensitive (higher threshold)
+  - **Default**: 0 (no offset)
+
+**Benefits:**
+- **Accurate thresholds** based on actual modulation requirements
+- **Hardware-specific calibration** for different DIY builds
+- **Automatic adaptation** to current bitrate/MCS
+- **Fallback protection** using legacy `emergency_rssi_threshold`
+
 #### **QP Delta Configuration (H.264/H.265 Encoder Quality Control)**
-- **`qp_delta_low`**: QP delta for low bitrate (MCS 1-2) - Default: 15 (was 30)
-- **`qp_delta_medium`**: QP delta for medium bitrate (MCS 3-9) - Default: 5
-- **`qp_delta_high`**: QP delta for high bitrate (MCS 10+) - Default: 0
-- **Lower values**: Better quality, higher bitrate usage
-- **Higher values**: Lower quality, more aggressive compression
+
+**What is QP Delta?**
+QP Delta is like a "quality dial" for your video encoder. Think of it as adjusting the compression level of your video stream:
+
+- **Lower QP Delta (0-5)**: High quality, larger file sizes, more bandwidth usage
+- **Higher QP Delta (10-30)**: Lower quality, smaller file sizes, less bandwidth usage
+
+**How It Works:**
+Your video encoder takes each frame and decides how much detail to keep vs. how much to compress away. QP Delta tells the encoder:
+- "At low bitrates, compress more aggressively" (higher QP delta)
+- "At high bitrates, keep maximum quality" (lower QP delta)
+
+**Real-World Analogy:**
+Imagine you're packing a suitcase:
+- **Small suitcase (low bitrate)**: Pack tightly, fold clothes more (higher QP delta = more compression)
+- **Large suitcase (high bitrate)**: Pack loosely, keep clothes unfolded (lower QP delta = less compression)
+
+**Configuration Guide:**
+
+| Bitrate Range | QP Delta | Effect | Use Case |
+|---------------|----------|--------|----------|
+| **Low (MCS 1-2)** | 15-30 | Aggressive compression | Poor signal, long range |
+| **Medium (MCS 3-9)** | 5-15 | Balanced quality/size | Normal operation |
+| **High (MCS 10+)** | 0-5 | Maximum quality | Good signal, short range |
+
+**Tuning Tips:**
+
+**For Racing (Low Latency):**
+```ini
+qp_delta_low=10      # Less compression for faster encoding
+qp_delta_medium=3    # High quality for smooth video
+qp_delta_high=0      # Maximum quality for best visibility
+```
+
+**For Long Range (Stability):**
+```ini
+qp_delta_low=25      # More compression for low bitrate
+qp_delta_medium=10   # Moderate compression for medium bitrate
+qp_delta_high=5      # Light compression for high bitrate
+```
+
+**For Balanced Performance:**
+```ini
+qp_delta_low=15      # Balanced low bitrate compression
+qp_delta_medium=5    # Balanced medium bitrate compression
+qp_delta_high=0      # Maximum quality at high bitrate
+```
+
+**What to Watch For:**
+- **Too High QP Delta**: Blocky, pixelated video
+- **Too Low QP Delta**: High bandwidth usage, potential drops
+- **Sweet Spot**: Clear video with stable connection
+
+**Hardware Considerations:**
+- **Weak Signal**: Use higher QP delta values (more compression)
+- **Strong Signal**: Use lower QP delta values (better quality)
+- **DIY Builds**: May need different values based on board quality
 
 ## Control Algorithm Comparison
 
@@ -741,6 +814,32 @@ lsmod | grep 88
 - **Total Memory**: < 5KB
 
 ## Changelog
+
+### **v2.1 - Dynamic RSSI Thresholds Release**
+
+#### **Major New Features:**
+- **Dynamic RSSI Thresholds**: MCS-based thresholds that adapt to current modulation
+- **Hardware Calibration**: Configurable RSSI offset for different DIY builds
+- **Automatic MCS Detection**: Converts bitrate to MCS for accurate threshold calculation
+
+#### **Technical Improvements:**
+- **MCS Lookup Table**: Based on 802.11n/ac standards with 10 MCS levels
+- **Hardware-Specific Offsets**: Calibrate for different board quality and antenna performance
+- **Fallback Protection**: Legacy `emergency_rssi_threshold` as backup
+- **Enhanced Debug Output**: Shows current MCS and calculated threshold
+
+#### **Configuration Options:**
+- **`hardware_rssi_offset`**: Calibrate for your specific DIY build
+- **Dynamic threshold calculation**: Automatic based on current MCS
+- **Conservative threshold selection**: Uses more sensitive threshold when needed
+
+#### **Benefits:**
+- **Accurate signal thresholds** based on actual modulation requirements
+- **Hardware-specific calibration** for different DIY builds
+- **Automatic adaptation** to current bitrate/MCS
+- **Better emergency drop timing** for optimal FPV performance
+
+---
 
 ### **v2.0 - Performance Optimization Release**
 
