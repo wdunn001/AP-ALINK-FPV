@@ -249,8 +249,10 @@ void init_lowpass_filter(lowpass_filter_t *filter, float cutoff_freq, float samp
     filter->sample_freq = sample_freq;
     filter->alpha = calc_lowpass_alpha_dt(1.0f / sample_freq, cutoff_freq);
     filter->initialised = false;
+#ifdef DEBUG
     printf("Low-pass filter initialized: cutoff=%.1fHz, sample=%.1fHz, alpha=%.3f\n", 
            cutoff_freq, sample_freq, filter->alpha);
+#endif
 }
 
 // Apply low-pass filter (ArduPilot style)
@@ -267,7 +269,9 @@ float lowpass_filter_apply(lowpass_filter_t *filter, float sample) {
 // Reset low-pass filter
 void reset_lowpass_filter(lowpass_filter_t *filter) {
     filter->initialised = false;
+#ifdef DEBUG
     printf("Low-pass filter reset\n");
+#endif
 }
 
 // Mode Filter Functions (ArduPilot style)
@@ -330,7 +334,9 @@ float mode_filter_apply(mode_filter_t *filter, float sample) {
 void reset_mode_filter(mode_filter_t *filter) {
     filter->sample_index = 0;
     filter->drop_high_sample = true;
+#ifdef DEBUG
     printf("Mode filter reset\n");
+#endif
 }
 
 // Derivative Filter Functions (for trend detection)
@@ -422,7 +428,9 @@ void reset_derivative_filter(derivative_filter_t *filter) {
     filter->sample_index = 0;
     filter->last_slope = 0.0f;
     filter->new_data = false;
+#ifdef DEBUG
     printf("Derivative filter reset\n");
+#endif
 }
 
 // 2-Pole Low-Pass Filter Functions (biquad filter)
@@ -433,7 +441,9 @@ void init_2pole_lpf(lpf_2pole_t *filter, float cutoff_freq, float sample_freq) {
     filter->delay_element_1 = 0.0f;
     filter->delay_element_2 = 0.0f;
     filter->initialised = false;
+#ifdef DEBUG
     printf("2-Pole LPF initialized: cutoff=%.1fHz, sample=%.1fHz\n", cutoff_freq, sample_freq);
+#endif
 }
 
 // Apply 2-pole low-pass filter (biquad implementation)
@@ -484,7 +494,9 @@ void reset_2pole_lpf(lpf_2pole_t *filter) {
     filter->delay_element_1 = 0.0f;
     filter->delay_element_2 = 0.0f;
     filter->initialised = false;
+#ifdef DEBUG
     printf("2-Pole LPF reset\n");
+#endif
 }
 
 // Filter Chain Functions
@@ -576,6 +588,7 @@ void parse_filter_chain(const char *config_str, filter_chain_t *chain) {
     free(config_copy);
     
     // Print filter chain configuration
+#ifdef DEBUG
     printf("Filter chain configured: ");
     for (uint8_t i = 0; i < count; i++) {
         const char *filter_name = (chain->filters[i] == FILTER_TYPE_KALMAN) ? "Kalman" :
@@ -586,6 +599,7 @@ void parse_filter_chain(const char *config_str, filter_chain_t *chain) {
         if (i < count - 1) printf(" -> ");
     }
     printf(" (%d filters)\n", count);
+#endif
 }
 
 // Reset all filters in a chain
@@ -694,16 +708,22 @@ void init_filters(float rssi_process_var, float rssi_measure_var,
     init_lowpass_filter(&dbm_lpf, lpf_cutoff_freq, lpf_sample_freq);
     
     // Initialize Mode filters (no parameters needed)
+#ifdef DEBUG
     printf("Mode filters initialized\n");
+#endif
     
     // Initialize Derivative filters (no parameters needed)
+#ifdef DEBUG
     printf("Derivative filters initialized\n");
+#endif
     
     // Initialize 2-Pole Low-Pass filters
     init_2pole_lpf(&rssi_2pole_lpf, lpf_cutoff_freq, lpf_sample_freq);
     init_2pole_lpf(&dbm_2pole_lpf, lpf_cutoff_freq, lpf_sample_freq);
     
+#ifdef DEBUG
     printf("All filter types initialized successfully\n");
+#endif
 }
 
 // Reset all filters
@@ -712,7 +732,9 @@ void reset_filters() {
     reset_filter_chain(&rssi_filter_chain);
     reset_filter_chain(&dbm_filter_chain);
     
+#ifdef DEBUG
     printf("All filter chains reset\n");
+#endif
 }
 
 // Cleanup function for memory-mapped files
@@ -720,7 +742,9 @@ void cleanup_memory_maps() {
     // Note: We can't easily clean up the static variables in get_dbm() and get_rssi()
     // because they're static and we don't have direct access to them here.
     // The OS will clean up memory maps when the process exits.
+#ifdef DEBUG
     printf("Memory maps cleanup completed\n");
+#endif
 }
 
 // Get current time in milliseconds
@@ -768,7 +792,9 @@ void pid_reset(pid_controller_t *pid) {
     pid->integral = 0.0f;
     pid->last_error = 0;
     pid->last_output = 0;
+#ifdef DEBUG
     printf("PID controller reset\n");
+#endif
 }
 
 // Initialize PID controller with custom parameters
@@ -1203,7 +1229,9 @@ int get_rssi(const char *readcmd) {
     char path[512];
     int rssi_percent = 0;
     
-    snprintf(path, sizeof(path), "%s/sta_tp_info", readcmd);
+    // Direct string concatenation - much faster than snprintf
+    strcpy(path, readcmd);
+    strcat(path, "/sta_tp_info");
     
     // Only remap if path changed
     if (strcmp(path, last_path) != 0) {
