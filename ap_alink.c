@@ -927,8 +927,8 @@ void autopower() {
 int set_realtime_priority() {
     struct sched_param param;
     
-    // Set high real-time priority
-    param.sched_priority = 50;  // High priority (1-99 range)
+    // Set low real-time priority (reduced to prevent SSH issues)
+    param.sched_priority = 10;  // Low priority (1-99 range)
     
     // Use SCHED_FIFO for consistent timing
     if (sched_setscheduler(0, SCHED_FIFO, &param) == -1) {
@@ -938,7 +938,7 @@ int set_realtime_priority() {
         return -1;
     }
     
-    printf("Real-time priority set successfully (SCHED_FIFO, priority 50)\n");
+    printf("Real-time priority set successfully (SCHED_FIFO, priority 10)\n");
     return 0;
 }
 
@@ -1020,10 +1020,8 @@ static sem_t worker_sem;
 static worker_cmd_t pending_cmd;
 static int worker_running = 0;
 
-// Global QP delta configuration (set by main thread, read by worker thread)
-static int global_qp_delta_low = 0;
-static int global_qp_delta_medium = 0;
-static int global_qp_delta_high = 0;
+// QP Delta configuration removed - ROI is disabled in recent Majestic builds
+// Video quality is now controlled by MCS rate control only
 
 // MCS to RSSI threshold lookup table (based on 802.11n/ac standards)
 // Values are minimum RSSI thresholds for reliable operation at each MCS
@@ -1103,10 +1101,7 @@ void *worker_thread_func(void *arg) {
                 char *mcspath = data->mcspath;
                 
                 if (bitrateMcs >= 1 && bitrateMcs < 3) {
-                    char qp_path[128];
-                    snprintf(qp_path, sizeof(qp_path), "/api/v1/set?fpv.roiQp=%d,0,0,%d", 
-                             global_qp_delta_low, global_qp_delta_low);
-                    http_get(qp_path);
+                    // ROI QP Delta disabled in recent Majestic builds - using MCS rate control only
                     snprintf(cmd, sizeof(cmd), "echo 0x0c > %s/rate_ctl", mcspath);
                     int result = execute_command(cmd);
                     if (result != 0) {
@@ -1114,10 +1109,7 @@ void *worker_thread_func(void *arg) {
                     }
                 }
                 else if (bitrateMcs >= 3 && bitrateMcs < 10) {
-                    char qp_path[128];
-                    snprintf(qp_path, sizeof(qp_path), "/api/v1/set?fpv.roiQp=%d,0,0,%d", 
-                             global_qp_delta_medium, global_qp_delta_medium);
-                    http_get(qp_path);
+                    // ROI QP Delta disabled in recent Majestic builds - using MCS rate control only
                     snprintf(cmd, sizeof(cmd), "echo 0x10 > %s/rate_ctl", mcspath);
                     int result = execute_command(cmd);
                     if (result != 0) {
@@ -1125,10 +1117,7 @@ void *worker_thread_func(void *arg) {
                     }
                 }
                 else {
-                    char qp_path[128];
-                    snprintf(qp_path, sizeof(qp_path), "/api/v1/set?fpv.roiQp=%d,0,0,%d", 
-                             global_qp_delta_high, global_qp_delta_high);
-                    http_get(qp_path);
+                    // ROI QP Delta disabled in recent Majestic builds - using MCS rate control only
                     snprintf(cmd, sizeof(cmd), "echo 0xFF > %s/rate_ctl", mcspath);
                     int result = execute_command(cmd);
                     if (result != 0) {
@@ -1172,8 +1161,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
              int *signal_sampling_interval, unsigned long *emergency_cooldown,
-             int *control_algorithm, int *qp_delta_low, int *qp_delta_medium, int *qp_delta_high,
-             int *signal_sampling_freq_hz, int *hardware_rssi_offset) {
+             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled, int *frame_sync_enabled) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1295,24 +1283,21 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
             sscanf(line + 18, "%d", control_algorithm);
             continue;
         }
-        if (strncmp(line, "qp_delta_low=", 13) == 0) {
-            sscanf(line + 13, "%d", qp_delta_low);
-            continue;
-        }
-        if (strncmp(line, "qp_delta_medium=", 16) == 0) {
-            sscanf(line + 16, "%d", qp_delta_medium);
-            continue;
-        }
-        if (strncmp(line, "qp_delta_high=", 14) == 0) {
-            sscanf(line + 14, "%d", qp_delta_high);
-            continue;
-        }
+        // QP Delta settings removed - ROI is disabled in recent Majestic builds
         if (strncmp(line, "signal_sampling_freq_hz=", 24) == 0) {
             sscanf(line + 24, "%d", signal_sampling_freq_hz);
             continue;
         }
         if (strncmp(line, "hardware_rssi_offset=", 21) == 0) {
             sscanf(line + 21, "%d", hardware_rssi_offset);
+            continue;
+        }
+        if (strncmp(line, "cooldown_enabled=", 17) == 0) {
+            sscanf(line + 17, "%d", cooldown_enabled);
+            continue;
+        }
+        if (strncmp(line, "frame_sync_enabled=", 19) == 0) {
+            sscanf(line + 19, "%d", frame_sync_enabled);
             continue;
         }
     }
@@ -1460,6 +1445,13 @@ int get_rssi(const char *readcmd) {
         if (sscanf(pos, "rssi : %d %%", &rssi_percent) != 1) {
             sscanf(pos, "rssi: %d %%", &rssi_percent);
         }
+#ifdef DEBUG
+        printf("DEBUG: Found RSSI in file: %d%%\n", rssi_percent);
+#endif
+    } else {
+#ifdef DEBUG
+        printf("DEBUG: No RSSI found in file content: %s\n", mapped_data);
+#endif
     }
     
     return rssi_percent;
@@ -1541,10 +1533,7 @@ int main() {
     int racing_exposure = 11;                       // Default racing exposure
     int racing_fps = 120;                           // Default racing frame rate
 
-    // QP Delta configuration parameters (H.264/H.265 encoder quality control)
-    int qp_delta_low = 15;      // Default QP delta for low bitrate (was 30)
-    int qp_delta_medium = 5;    // Default QP delta for medium bitrate
-    int qp_delta_high = 0;      // Default QP delta for high bitrate
+    // QP Delta configuration removed - ROI is disabled in recent Majestic builds
 
     // Signal sampling configuration
     int signal_sampling_interval = 5;               // Default: sample every 5 frames (legacy)
@@ -1558,6 +1547,12 @@ int main() {
 
     // Control algorithm configuration
     int control_algorithm = CONTROL_ALGORITHM_FIFO;  // Default: Simple FIFO (more performant)
+
+    // Cooldown system control
+    int cooldown_enabled = 1;  // Default: enabled (1=enabled, 0=disabled)
+
+    // Frame sync control
+    int frame_sync_enabled = 1;  // Default: enabled (1=enabled, 0=disabled)
 
     // Filtered values
     float filtered_rssi = 50.0f;
@@ -1575,13 +1570,7 @@ int main() {
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
            &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
-           &qp_delta_low, &qp_delta_medium, &qp_delta_high, &signal_sampling_freq_hz,
-           &hardware_rssi_offset_config);
-    
-    // Set global QP delta values for worker thread
-    global_qp_delta_low = qp_delta_low;
-    global_qp_delta_medium = qp_delta_medium;
-    global_qp_delta_high = qp_delta_high;
+           &signal_sampling_freq_hz, &hardware_rssi_offset_config, &cooldown_enabled, &frame_sync_enabled);
     
     // Set global hardware RSSI offset
     hardware_rssi_offset = hardware_rssi_offset_config;
@@ -1634,6 +1623,20 @@ int main() {
     printf("Hardware RSSI offset: %d dBm\n", hardware_rssi_offset_config);
     printf("Dynamic RSSI thresholds enabled (MCS-based)\n");
     
+    // Print cooldown system status
+    if (cooldown_enabled) {
+        printf("Cooldown system: ENABLED (asymmetric timing)\n");
+    } else {
+        printf("Cooldown system: DISABLED (immediate bitrate changes)\n");
+    }
+    
+    // Print frame sync status
+    if (frame_sync_enabled) {
+        printf("Frame sync: ENABLED (synchronized to %d FPS)\n", target_fps);
+    } else {
+        printf("Frame sync: DISABLED (maximum responsiveness)\n");
+    }
+    
     // Initialize worker thread
     sem_init(&worker_sem, 0, 0);
     worker_running = 1;
@@ -1642,13 +1645,40 @@ int main() {
         exit(1);
     }
     
+    // Startup delay to allow SSH connections and system stabilization
+    printf("Starting up... allowing 5 seconds for SSH connections\n");
+    sleep(5);
+    printf("Startup complete - beginning adaptive link control\n");
 
     if (strcmp(NIC, "8812eu2") == 0) {
         strcpy(driverpath, "/proc/net/rtl88x2eu/wlan0");
-
+#ifdef DEBUG
+        printf("DEBUG: Using driver path: %s\n", driverpath);
+#endif
     }
     else if (strcmp(NIC, "8812au") == 0) {
         strcpy(driverpath, "/proc/net/rtl88xxau/wlan0");
+#ifdef DEBUG
+        printf("DEBUG: Using driver path: %s\n", driverpath);
+#endif
+    }
+    else {
+        printf("ERROR: Unknown WiFi card: %s\n", NIC);
+        printf("Available options: 8812eu2, 8812au\n");
+        exit(1);
+    }
+    
+    // Check if driver path exists
+    char test_path[512];
+    snprintf(test_path, sizeof(test_path), "%s/sta_tp_info", driverpath);
+    if (access(test_path, R_OK) != 0) {
+        printf("ERROR: Driver path does not exist: %s\n", test_path);
+        printf("Please check your WiFi card configuration\n");
+        exit(1);
+    } else {
+#ifdef DEBUG
+        printf("DEBUG: Driver path verified: %s\n", test_path);
+#endif
     }
     
     if (RaceMode != 1 && RaceMode != 0) {
@@ -1690,26 +1720,28 @@ int main() {
     }
     
     while (1) {
-        // Frame-sync timing: sleep for exact frame duration
-        struct timespec current_time;
-        clock_gettime(CLOCK_MONOTONIC, &current_time);
-        
-        long elapsed_ns = (current_time.tv_sec - last_frame_time.tv_sec) * 1000000000L + 
-                          (current_time.tv_nsec - last_frame_time.tv_nsec);
-        
-        if (elapsed_ns < frame_interval_ns) {
-            // Sleep for the remaining frame duration
-            long sleep_ns = frame_interval_ns - elapsed_ns;
-            struct timespec sleep_time = {
-                .tv_sec = sleep_ns / 1000000000L,
-                .tv_nsec = sleep_ns % 1000000000L
-            };
-            nanosleep(&sleep_time, NULL);
-            continue;
+        // Frame-sync timing: sleep for exact frame duration (if enabled)
+        if (frame_sync_enabled) {
+            struct timespec current_time;
+            clock_gettime(CLOCK_MONOTONIC, &current_time);
+            
+            long elapsed_ns = (current_time.tv_sec - last_frame_time.tv_sec) * 1000000000L + 
+                              (current_time.tv_nsec - last_frame_time.tv_nsec);
+            
+            if (elapsed_ns < frame_interval_ns) {
+                // Sleep for the remaining frame duration
+                long sleep_ns = frame_interval_ns - elapsed_ns;
+                struct timespec sleep_time = {
+                    .tv_sec = sleep_ns / 1000000000L,
+                    .tv_nsec = sleep_ns % 1000000000L
+                };
+                nanosleep(&sleep_time, NULL);
+                continue;
+            }
+            
+            // Update frame time and proceed
+            last_frame_time = current_time;
         }
-        
-        // Update frame time and proceed
-        last_frame_time = current_time;
         
         loop_counter++;
         
@@ -1778,6 +1810,18 @@ int main() {
         
         //MAIN LOGIC
 
+        // Emergency stop if RSSI is zero (driver issue)
+        if (rssi == 0) {
+            printf("ERROR: RSSI is zero - driver path issue detected!\n");
+            printf("Current driver path: %s\n", driverpath);
+            printf("Please check WiFi card configuration and driver paths\n");
+            printf("System will continue but bitrate changes are disabled\n");
+            // Don't change bitrate if RSSI is zero to prevent constant changes
+            // Sleep longer to reduce CPU usage and allow SSH access
+            usleep(500000); // 500ms sleep to reduce CPU load and allow SSH
+            continue;
+        }
+
         // RSSI fallback
             // Clamp VLQ between 0 and 100
             if ( currentDb > histeris || currentDb < minushisteris ) {
@@ -1824,8 +1868,8 @@ int main() {
                 if (bitrate > bitrate_max) bitrate = bitrate_max;
             }
 
-            // Apply asymmetric cooldown logic before changing bitrate
-            if (should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms)) {
+            // Apply cooldown logic before changing bitrate (if enabled)
+            if (cooldown_enabled == 0 || should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms)) {
                 set_bitrate_async(bitrate);
                 set_mcs_async(bitrate, driverpath);
                 
