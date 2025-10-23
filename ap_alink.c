@@ -1290,83 +1290,90 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
 
 
 int get_dbm() {
-    static char *mapped_data = NULL;
-    static size_t mapped_size = 0;
-    static bool initialized = false;
     int dbm = -100;
-    
-    if (!initialized) {
-        int fd = open("/proc/net/wireless", O_RDONLY);
-        if (fd < 0) {
-            perror("Failed to open /proc/net/wireless");
-            return dbm;
-        }
-        
-        struct stat st;
-        if (fstat(fd, &st) < 0) {
-            perror("fstat");
-            close(fd);
-            return dbm;
-        }
-        
-        mapped_size = st.st_size;
-        if (mapped_size == 0) {
-            close(fd);
-            return dbm;
-        }
-        
-        mapped_data = mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd);
-        
-        if (mapped_data == MAP_FAILED) {
-            perror("mmap");
-            mapped_data = NULL;
-            return dbm;
-        }
-        
-        initialized = true;
-    }
-    
-    if (mapped_data == NULL) {
+    FILE *fp = fopen("/proc/net/wireless", "r");
+    if (fp == NULL) {
+#ifdef DEBUG
+        perror("Failed to open /proc/net/wireless");
+#endif
         return dbm;
     }
     
-    // Parse the mapped data directly
-    char *line_start = mapped_data;
-    char *line_end;
+    char line[256];
     int line_count = 0;
     
-    // Skip first two header lines
-    while (line_count < 2 && (line_end = strchr(line_start, '\n')) != NULL) {
-        line_start = line_end + 1;
+    // Read lines
+    while (fgets(line, sizeof(line), fp) != NULL) {
         line_count++;
-    }
-    
-    // Parse the wlan0 line (third line)
-    if (line_end != NULL && (line_end = strchr(line_start, '\n')) != NULL) {
-        *line_end = '\0';  // Null-terminate the line
         
-        // Parse fields: "wlan0: 0000 1234 5678 90ab  cdef  1234  5678  90ab  cdef"
-        char *token = strtok(line_start, " \t");
-        int field_count = 0;
-        
-        while (token != NULL && field_count < 3) {
-            if (field_count == 2) {
-                // Field 2 is signal level in centi-dBm
-                dbm = atoi(token) / 100;
-                break;
-            }
-            token = strtok(NULL, " \t");
-            field_count++;
+        // Skip header lines
+        if (line_count <= 2) {
+            continue;
         }
         
-        *line_end = '\n';  // Restore the newline
+        // Look for wlan0 line
+        if (strstr(line, "wlan0:") != NULL) {
+            // Parse fields: "wlan0: status link level noise nwid crypt frag retry misc"
+            // Format: "wlan0: 0000   1234  -45.  -95   0     0     0    0    0"
+            char interface[32];
+            int status, link;
+            float level;  // Signal level in dBm
+            
+            if (sscanf(line, "%s %x %d %f", interface, &status, &link, &level) >= 4) {
+                dbm = (int)level;
+#ifdef DEBUG
+                printf("DEBUG: Read dBm from /proc/net/wireless: %d\n", dbm);
+#endif
+            }
+            break;
+        }
     }
     
+    fclose(fp);
     return dbm;
 }
 
 
+
+// Get dBm from sta_tp_info file (alternative to /proc/net/wireless)
+int get_dbm_from_sta_tp_info(const char *readcmd) {
+    char path[512];
+    int dbm = -100;
+    
+    strcpy(path, readcmd);
+    strcat(path, "/sta_tp_info");
+    
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        return dbm;
+    }
+    
+    char buffer[1024];
+    if (fread(buffer, 1, sizeof(buffer)-1, fp) > 0) {
+        buffer[sizeof(buffer)-1] = '\0';
+        
+        // Look for dBm value in various formats
+        char *pos;
+        if ((pos = strstr(buffer, "signal")) != NULL) {
+            int signal_dbm;
+            if (sscanf(pos, "signal : %d dBm", &signal_dbm) == 1 ||
+                sscanf(pos, "signal: %d dBm", &signal_dbm) == 1 ||
+                sscanf(pos, "signal=%d", &signal_dbm) == 1) {
+                dbm = signal_dbm;
+            }
+        } else if ((pos = strstr(buffer, "rssi")) != NULL) {
+            // Some drivers report RSSI in dBm
+            int rssi_dbm;
+            if (sscanf(pos, "rssi : %d dBm", &rssi_dbm) == 1 ||
+                sscanf(pos, "rssi: %d dBm", &rssi_dbm) == 1) {
+                dbm = rssi_dbm;
+            }
+        }
+    }
+    
+    fclose(fp);
+    return dbm;
+}
 
 int get_rssi(const char *readcmd) {
     static char *mapped_data = NULL;
@@ -1432,9 +1439,29 @@ int get_rssi(const char *readcmd) {
         printf("DEBUG: Found RSSI in file: %d%%\n", rssi_percent);
 #endif
     } else {
+        // Try alternative formats from sta_tp_info
+        // Some drivers might use "signal" instead of "rssi"
+        pos = strstr(mapped_data, "signal");
+        if (pos) {
+            int signal_dbm;
+            if (sscanf(pos, "signal : %d dBm", &signal_dbm) == 1 ||
+                sscanf(pos, "signal: %d dBm", &signal_dbm) == 1 ||
+                sscanf(pos, "signal=%d", &signal_dbm) == 1) {
+                // Convert dBm to percentage (rough approximation)
+                // -30 dBm = 100%, -90 dBm = 0%
+                rssi_percent = (signal_dbm + 90) * 100 / 60;
+                if (rssi_percent > 100) rssi_percent = 100;
+                if (rssi_percent < 0) rssi_percent = 0;
 #ifdef DEBUG
-        printf("DEBUG: No RSSI found in file content: %s\n", mapped_data);
+                printf("DEBUG: Found signal in dBm: %d dBm -> %d%%\n", signal_dbm, rssi_percent);
 #endif
+            }
+        } else {
+#ifdef DEBUG
+            printf("DEBUG: No RSSI or signal found in sta_tp_info\n");
+            printf("DEBUG: File content (first 200 chars): %.200s\n", mapped_data);
+#endif
+        }
     }
     
     return rssi_percent;
@@ -1711,9 +1738,9 @@ int main() {
     }
     
     while (1) {
-        // Simple loop with configurable sleep to prevent CPU spinning
-        // No frame sync needed - bitrate control is independent of video!
-        usleep(1000); // 1ms base sleep to prevent 100% CPU
+        // Main control loop - small sleep to prevent CPU spinning
+        // Sleep is short to allow responsive signal sampling
+        usleep(100); // 100us (0.1ms) - allows up to 10kHz loop rate
         
         loop_counter++;
         
@@ -1734,7 +1761,21 @@ int main() {
             
             // Read signal data
             currentDb = dbm - aDb;
+            
+            // Try to get dBm from /proc/net/wireless first
             dbm = get_dbm();
+            
+            // If that fails or returns invalid value, try sta_tp_info
+            if (dbm == -100 || dbm == 0) {
+                int alt_dbm = get_dbm_from_sta_tp_info(driverpath);
+                if (alt_dbm != -100) {
+                    dbm = alt_dbm;
+#ifdef DEBUG
+                    printf("DEBUG: Using dBm from sta_tp_info: %d\n", dbm);
+#endif
+                }
+            }
+            
             aDb = dbm; 
             rssi = get_rssi(driverpath);
             
@@ -1823,15 +1864,17 @@ int main() {
         }
 
         // WiFi performance mode optimization
+        // These sleeps are ONLY used when RSSI is actively being processed
+        // The main loop sleep (100us) handles idle time
         if (wifi_performance_mode == 0) {
-            // Normal mode - standard processing
-            usleep(50000); // 50ms sleep for normal mode
+            // Normal mode - add extra delay after processing
+            usleep(20000); // 20ms extra sleep for lower CPU
         } else if (wifi_performance_mode == 2) {
-            // Ultra-low latency mode - minimal sleep
-            usleep(10000); // 10ms sleep for ultra-low latency
+            // Ultra-low latency mode - no extra sleep
+            // Relies only on main loop sleep for maximum responsiveness
         } else {
-            // Mode 1 (high performance) - small sleep to prevent CPU spinning
-            usleep(1000); // 1ms sleep to prevent 100% CPU
+            // Mode 1 (high performance) - small extra sleep
+            usleep(5000); // 5ms extra sleep for balanced performance
         }
 
         // RSSI fallback
