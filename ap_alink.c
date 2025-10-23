@@ -942,22 +942,8 @@ int set_realtime_priority() {
     return 0;
 }
 
-// Frame-sync timing for optimal video quality
-static struct timespec last_frame_time;
-static int target_fps = 120;  // Default racing frame rate
-static long frame_interval_ns = 0;
-
-// Initialize frame-sync timing
-void init_frame_sync(int fps) {
-    target_fps = fps;
-    frame_interval_ns = 1000000000L / target_fps;  // Convert to nanoseconds
-    
-    // Get current time as starting point
-    clock_gettime(CLOCK_MONOTONIC, &last_frame_time);
-    
-    printf("Frame-sync initialized: %d FPS (%.2f ms interval)\n", 
-           target_fps, frame_interval_ns / 1000000.0);
-}
+// Removed frame-sync timing - not needed for bitrate control!
+// Bitrate control is independent of video frame rate
 
 // Optimized HTTP GET implementation - fire-and-forget for FPV applications
 int http_get(const char *path) {
@@ -1161,7 +1147,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
              int *signal_sampling_interval, unsigned long *emergency_cooldown,
-             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled, int *frame_sync_enabled) {
+             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -1296,10 +1282,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
             sscanf(line + 17, "%d", cooldown_enabled);
             continue;
         }
-        if (strncmp(line, "frame_sync_enabled=", 19) == 0) {
-            sscanf(line + 19, "%d", frame_sync_enabled);
-            continue;
-        }
+        // Frame sync removed - not needed
     }
 
     fclose(fp);
@@ -1551,8 +1534,7 @@ int main() {
     // Cooldown system control
     int cooldown_enabled = 1;  // Default: enabled (1=enabled, 0=disabled)
 
-    // Frame sync control
-    int frame_sync_enabled = 1;  // Default: enabled (1=enabled, 0=disabled)
+    // Frame sync removed - not needed for bitrate control
 
     // WiFi state monitoring
     int wifi_driver_available = 1;  // Track if WiFi driver path exists
@@ -1577,7 +1559,7 @@ int main() {
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
            &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
-           &signal_sampling_freq_hz, &hardware_rssi_offset_config, &cooldown_enabled, &frame_sync_enabled);
+           &signal_sampling_freq_hz, &hardware_rssi_offset_config, &cooldown_enabled);
     
     // Set global hardware RSSI offset
     hardware_rssi_offset = hardware_rssi_offset_config;
@@ -1617,8 +1599,7 @@ int main() {
     // Set real-time priority for ultra-high performance racing VTX
     set_realtime_priority();
     
-    // Initialize frame-sync timing
-    init_frame_sync(target_fps);
+    // Frame sync removed - not needed for bitrate control
     
     // Initialize signal sampling timing (independent of frame rate)
     long signal_sampling_interval_ns = 1000000000L / signal_sampling_freq_hz;  // Convert Hz to nanoseconds
@@ -1637,12 +1618,7 @@ int main() {
         printf("Cooldown system: DISABLED (immediate bitrate changes)\n");
     }
     
-    // Print frame sync status
-    if (frame_sync_enabled) {
-        printf("Frame sync: ENABLED (synchronized to %d FPS)\n", target_fps);
-    } else {
-        printf("Frame sync: DISABLED (maximum responsiveness)\n");
-    }
+    // Frame sync removed - bitrate control runs independently
     
     // Initialize worker thread
     sem_init(&worker_sem, 0, 0);
@@ -1735,27 +1711,9 @@ int main() {
     }
     
     while (1) {
-        // Frame-sync timing: sleep for exact frame duration (if enabled)
-        if (frame_sync_enabled) {
-            struct timespec current_time;
-            clock_gettime(CLOCK_MONOTONIC, &current_time);
-            
-            long elapsed_ns = (current_time.tv_sec - last_frame_time.tv_sec) * 1000000000L + 
-                              (current_time.tv_nsec - last_frame_time.tv_nsec);
-            
-            if (elapsed_ns < frame_interval_ns) {
-                // Sleep for the remaining frame duration
-                long sleep_ns = frame_interval_ns - elapsed_ns;
-                struct timespec sleep_time = {
-                    .tv_sec = sleep_ns / 1000000000L,
-                    .tv_nsec = sleep_ns % 1000000000L
-                };
-                nanosleep(&sleep_time, NULL);
-            }
-            
-            // Update frame time for next iteration
-            clock_gettime(CLOCK_MONOTONIC, &last_frame_time);
-        }
+        // Simple loop with configurable sleep to prevent CPU spinning
+        // No frame sync needed - bitrate control is independent of video!
+        usleep(1000); // 1ms base sleep to prevent 100% CPU
         
         loop_counter++;
         
