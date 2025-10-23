@@ -1692,14 +1692,19 @@ int main() {
         printf("DEBUG: Driver path verified: %s\n", test_path);
 #endif
         wifi_driver_available = 1;  // Mark WiFi driver as available
+    }
     
     if (RaceMode != 1 && RaceMode != 0) {
         printf("invalid value for racemode\n");
     } else if (RaceMode == 1) {
        
-        printf("RACEMODE ENABLE");
+        printf("RACEMODE ENABLE\n");
         char cmd1[512];
         snprintf(cmd1, sizeof(cmd1), "echo 20 > %s/ack_timeout", driverpath);
+        int ack_result = execute_command(cmd1);
+        if (ack_result != 0) {
+            printf("Warning: Failed to set ack_timeout\n");
+        }
         //SET BITRATE MAX 4MBPS
         bitrate_max=4;
         //SET BUFFER SETTING
@@ -1727,9 +1732,6 @@ int main() {
         
     } else {
         printf("racemode disable\n");
-
-        
-    }
     }
     
     while (1) {
@@ -1749,11 +1751,10 @@ int main() {
                     .tv_nsec = sleep_ns % 1000000000L
                 };
                 nanosleep(&sleep_time, NULL);
-                continue;
             }
             
-            // Update frame time and proceed
-            last_frame_time = current_time;
+            // Update frame time for next iteration
+            clock_gettime(CLOCK_MONOTONIC, &last_frame_time);
         }
         
         loop_counter++;
@@ -1828,7 +1829,8 @@ int main() {
       
 #ifdef DEBUG
         // Only show debug output when we read new signal data
-        if (new_signal_data) {
+        static int debug_counter = 0;
+        if (new_signal_data && (++debug_counter % 10 == 0)) {  // Show every 10th sample
             printf("vlq = %.2f%%\n", vlq);
             printf("rssi = %d (filtered: %.1f)\n", rssi, filtered_rssi);
             printf("adb= %d\n", aDb);
@@ -1869,8 +1871,10 @@ int main() {
         } else if (wifi_performance_mode == 2) {
             // Ultra-low latency mode - minimal sleep
             usleep(10000); // 10ms sleep for ultra-low latency
+        } else {
+            // Mode 1 (high performance) - small sleep to prevent CPU spinning
+            usleep(1000); // 1ms sleep to prevent 100% CPU
         }
-        // Mode 1 (high performance) uses default timing
 
         // RSSI fallback
             // Clamp VLQ between 0 and 100
