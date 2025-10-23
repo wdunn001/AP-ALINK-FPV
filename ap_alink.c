@@ -1554,6 +1554,13 @@ int main() {
     // Frame sync control
     int frame_sync_enabled = 1;  // Default: enabled (1=enabled, 0=disabled)
 
+    // WiFi state monitoring
+    int wifi_driver_available = 1;  // Track if WiFi driver path exists
+
+    // WiFi performance mode
+    int wifi_performance_mode = 1;  // Default: high performance (1=enabled, 0=disabled)
+    // Note: wifi_error_recovery removed - not currently implemented
+
     // Filtered values
     float filtered_rssi = 50.0f;
     float filtered_dbm = -60.0f;
@@ -1674,12 +1681,17 @@ int main() {
     if (access(test_path, R_OK) != 0) {
         printf("ERROR: Driver path does not exist: %s\n", test_path);
         printf("Please check your WiFi card configuration\n");
-        exit(1);
+        printf("Common solutions:\n");
+        printf("  1. Change wificard=8812au in config\n");
+        printf("  2. Check if WiFi is enabled: iwconfig\n");
+        printf("  3. Verify driver is loaded: lsmod | grep 88\n");
+        printf("System will continue with disabled bitrate control\n");
+        wifi_driver_available = 0;  // Mark WiFi driver as unavailable
     } else {
 #ifdef DEBUG
         printf("DEBUG: Driver path verified: %s\n", test_path);
 #endif
-    }
+        wifi_driver_available = 1;  // Mark WiFi driver as available
     
     if (RaceMode != 1 && RaceMode != 0) {
         printf("invalid value for racemode\n");
@@ -1717,6 +1729,7 @@ int main() {
         printf("racemode disable\n");
 
         
+    }
     }
     
     while (1) {
@@ -1786,13 +1799,32 @@ int main() {
         }
         
         //calculation of dbm_Max dbm_Min
-        
-
         dbm_Max = -50;      
         dbm_Min = (filtered_rssi > 55) ? -70 : (filtered_rssi >= 40 ? -55 : -53);
 
+        // Ensure dbm_Min is always less than dbm_Max to prevent divide by zero
+        if (dbm_Min >= dbm_Max) {
+            dbm_Min = dbm_Max - 1;  // Force at least 1dB difference
+        }
 
-        double vlq = ((double)((filtered_dbm) - (dbm_Min)) / (double)((dbm_Max) - (dbm_Min))) * 100.0;
+        // Calculate VLQ with bounds checking
+        double vlq;
+        if (dbm_Max == dbm_Min) {
+            // Fallback: if somehow they're still equal, use RSSI-based calculation
+            vlq = (filtered_rssi > 0) ? ((double)filtered_rssi / 100.0) * 100.0 : 0.0;
+        } else {
+            // Additional safety check for invalid dBm values
+            if (filtered_dbm < -100 || filtered_dbm > 0) {
+                // Invalid dBm reading, use RSSI fallback
+                vlq = (filtered_rssi > 0) ? ((double)filtered_rssi / 100.0) * 100.0 : 0.0;
+            } else {
+                vlq = ((double)((filtered_dbm) - (dbm_Min)) / (double)((dbm_Max) - (dbm_Min))) * 100.0;
+            }
+        }
+
+        // Clamp VLQ to valid range (0-100%)
+        if (vlq < 0.0) vlq = 0.0;
+        if (vlq > 100.0) vlq = 100.0;
       
 #ifdef DEBUG
         // Only show debug output when we read new signal data
@@ -1801,6 +1833,7 @@ int main() {
             printf("rssi = %d (filtered: %.1f)\n", rssi, filtered_rssi);
             printf("adb= %d\n", aDb);
             printf("dbm= %d (filtered: %.1f)\n", dbm, filtered_dbm);
+            printf("dbm_Max = %d, dbm_Min = %d\n", dbm_Max, dbm_Min);
             printf("current %d\n", currentDb);
         }
 #endif
@@ -1822,20 +1855,35 @@ int main() {
             continue;
         }
 
+        // Skip bitrate control if WiFi driver is not available
+        if (!wifi_driver_available) {
+            printf("WiFi driver not available - skipping bitrate control\n");
+            usleep(100000); // 100ms sleep to reduce CPU usage
+            continue;
+        }
+
+        // WiFi performance mode optimization
+        if (wifi_performance_mode == 0) {
+            // Normal mode - standard processing
+            usleep(50000); // 50ms sleep for normal mode
+        } else if (wifi_performance_mode == 2) {
+            // Ultra-low latency mode - minimal sleep
+            usleep(10000); // 10ms sleep for ultra-low latency
+        }
+        // Mode 1 (high performance) uses default timing
+
         // RSSI fallback
             // Clamp VLQ between 0 and 100
             if ( currentDb > histeris || currentDb < minushisteris ) {
                 if (vlq > 100.0 || rssi > 55) {
-       
-                //system("wget -qO- \"http://localhost/api/v1/set?image.saturation=50\" > /dev/null 2>&1");
-                bitrate = bitrate_max;
-            }
+                    //system("wget -qO- \"http://localhost/api/v1/set?image.saturation=50\" > /dev/null 2>&1");
+                    bitrate = bitrate_max;
+                }
             else if (vlq < 1 || rssi < 20) {
                 bitrate = bitrate_min;
 
                 //BW 
                 //system("wget -qO- \"http://localhost/api/v1/set?image.saturation=0\" > /dev/null 2>&1");
-                       
             }
              else {
                 // Calculate target bitrate using VLQ
@@ -1867,6 +1915,7 @@ int main() {
                 if (bitrate < bitrate_min) bitrate = bitrate_min;
                 if (bitrate > bitrate_max) bitrate = bitrate_max;
             }
+            }
 
             // Apply cooldown logic before changing bitrate (if enabled)
             if (cooldown_enabled == 0 || should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms)) {
@@ -1896,7 +1945,6 @@ int main() {
         fflush(stdout);
 #endif
         // Frame-sync timing handles the delay automatically
-        }
     }
     
     // Cleanup worker thread
