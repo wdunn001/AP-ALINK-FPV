@@ -23,7 +23,6 @@
 
 // System Configuration Constants (Runtime Configurable)
 #define MAX_COMMAND_LENGTH 1024
-#define MCS_PATH_BUFFER_SIZE 256
 #define COMMAND_BUFFER_SIZE 128
 static int HTTP_TIMEOUT_US = 100000;  // 100ms timeout
 static int HTTP_PORT = 80;
@@ -112,6 +111,7 @@ static float pid_ki = 0.05f;
 static float pid_kd = 0.4f;
 static int race_mode = 1;
 static int disable_wifi_power_save = 1;  // Default: disable power saving for FPV stability
+static int enable_maximum_tx_power = 1;  // Default: enable maximum TX power for FPV range
 static int pit_mode_enabled = 0;         // PIT mode: low power standby with HTTP wake-up
 static int hardware_mcs_offset = 0;      // Hardware-specific MCS threshold offset (set during init)
 static int hardware_mcs_low_cmd = 0x10;  // Hardware-specific MCS low command (set during init)
@@ -120,62 +120,185 @@ static int hardware_mcs_high_cmd = 0x10; // Hardware-specific MCS high command (
 static char racing_video_resolution[32] = "1280x720";
 static int racing_exposure = 11;
 static int racing_fps = 120;
+static int auto_exposure_enabled = 1;  // Enable automatic exposure calculation
 static char racing_rssi_filter_chain_config[64] = "1";
 static char racing_dbm_filter_chain_config[64] = "1";
 static int wifi_performance_mode = 0;
 
 // =============================================================================
+// WIFI CARD INITIALIZATION
+// =============================================================================
+
+// Forward declarations
+void disable_autopower(void);
+void set_maximum_tx_power(void);
+extern int wifi_driver_available;
+
+/**
+ * Initialize WiFi card with all necessary configurations
+ * 
+ * This function consolidates all WiFi card setup including:
+ * - Driver path detection (always needed for MCS commands)
+ * - Driver path validation (only for RSSI reading - non-critical)
+ * - Hardware-specific MCS configuration (always needed)
+ * - Maximum TX power setup (always needed)
+ * - Power saving disable (always needed)
+ * 
+ * NOTE: Driver path validation failure does NOT prevent initialization.
+ * MCS configuration and power management are always applied.
+ * Only RSSI reading is affected by driver path issues.
+ * 
+ * @param wificard_type WiFi card type string (e.g., "8812eu2", "8812au", "873xbu")
+ * @param driverpath Output buffer for driver path
+ * @return 1 if initialization successful, 0 if failed (only on invalid card type)
+ */
+static int wifi_card_init(const char* wificard_type, char* driverpath) {
+    printf("Initializing WiFi card: %s\n", wificard_type);
+    
+    // =============================================================================
+    // 1. DRIVER PATH DETECTION
+    // =============================================================================
+    if (strcmp(wificard_type, "8812eu2") == 0) {
+        strcpy(driverpath, "/proc/net/rtl88x2eu/wlan0");
+        printf("Driver path: %s\n", driverpath);
+    }
+    else if (strcmp(wificard_type, "8812au") == 0) {
+        strcpy(driverpath, "/proc/net/rtl88xxau/wlan0");
+        printf("Driver path: %s\n", driverpath);
+    }
+    else if (strcmp(wificard_type, "873xbu") == 0) {
+        strcpy(driverpath, "/proc/net/rtl873xbu/wlan0");
+        printf("Driver path: %s\n", driverpath);
+    }
+    else {
+        printf("ERROR: Unknown WiFi card: %s\n", wificard_type);
+        printf("Available options: 8812eu2, 8812au, 873xbu\n");
+        return 0;
+    }
+    
+    // =============================================================================
+    // 2. DRIVER PATH VALIDATION (Only if RSSI reading is enabled)
+    // =============================================================================
+    char test_path[512];
+    snprintf(test_path, sizeof(test_path), "%s/sta_tp_info", driverpath);
+    if (access(test_path, R_OK) != 0) {
+        printf("WARNING: Driver path does not exist: %s\n", test_path);
+        printf("RSSI reading will be disabled - bitrate control will use fallback methods\n");
+        printf("Common solutions:\n");
+        printf("  1. Change wificard=8812au in config\n");
+        printf("  2. Check if WiFi is enabled: iwconfig\n");
+        printf("  3. Verify driver is loaded: lsmod | grep 88\n");
+        wifi_driver_available = 0;
+    } else {
+        printf("Driver path verified: %s\n", test_path);
+        wifi_driver_available = 1;
+    }
+    
+    // =============================================================================
+    // 3. HARDWARE-SPECIFIC MCS CONFIGURATION
+    // =============================================================================
+    if (strcmp(wificard_type, "8812au") == 0) {
+        hardware_mcs_offset = 0;  // Most aggressive - maximum performance
+        hardware_mcs_low_cmd = 0x0c;    // Low MCS command
+        hardware_mcs_medium_cmd = 0x10; // Medium MCS command
+        hardware_mcs_high_cmd = 0xFF;   // High MCS command
+        printf("Hardware MCS: RTL8812AU - Aggressive thresholds (maximum performance)\n");
+    } else if (strcmp(wificard_type, "8812eu2") == 0) {
+        hardware_mcs_offset = 2;  // Most conservative - maximum stability
+        hardware_mcs_low_cmd = 0x08;    // Conservative low MCS command
+        hardware_mcs_medium_cmd = 0x0c; // Conservative medium MCS command
+        hardware_mcs_high_cmd = 0x10;   // Conservative high MCS command
+        printf("Hardware MCS: RTL8812EU - Conservative thresholds (+2 dBm, maximum stability)\n");
+    } else if (strcmp(wificard_type, "873xbu") == 0) {
+        hardware_mcs_offset = 1;  // Balanced - optimal performance/stability
+        hardware_mcs_low_cmd = 0x0a;    // Balanced low MCS command
+        hardware_mcs_medium_cmd = 0x0e; // Balanced medium MCS command
+        hardware_mcs_high_cmd = 0x20;   // Balanced high MCS command
+        printf("Hardware MCS: RTL873xBU - Balanced thresholds (+1 dBm, optimal balance)\n");
+    } else {
+        hardware_mcs_offset = 0;  // Default fallback
+        hardware_mcs_low_cmd = 0x10;    // Default commands
+        hardware_mcs_medium_cmd = 0x10;
+        hardware_mcs_high_cmd = 0x10;
+        printf("Hardware MCS: Unknown - Using default thresholds\n");
+    }
+    
+    // =============================================================================
+    // 4. POWER MANAGEMENT CONFIGURATION
+    // =============================================================================
+    printf("Configuring WiFi power management...\n");
+    
+    // Disable WiFi power saving for FPV stability
+    disable_autopower();
+    
+    // Set maximum transmission power for maximum FPV range
+    set_maximum_tx_power();
+    
+    printf("WiFi card initialization complete\n");
+    return 1;
+}
+
+// =============================================================================
+
+/**
+ * Calculate optimal exposure time based on frame rate using 180° shutter rule
+ * 
+ * NOTE: This is a cinematography guideline for global shutter cameras.
+ * CMOS rolling shutter cameras (like IMX415) can set exposure independently of frame rate.
+ * This function provides a starting point, but exposure should be optimized for:
+ * - Racing: Short exposure for minimal motion blur
+ * - Low Light: Longer exposure for brightness  
+ * - Latency: Short exposure for responsiveness
+ * 
+ * @param fps Frame rate in frames per second
+ * @return Calculated exposure time in milliseconds
+ */
+static int calculate_exposure_from_fps(int fps) {
+    if (fps <= 0) {
+        return 8; // Default fallback
+    }
+    
+    // Calculate frame period in milliseconds
+    float frame_period_ms = 1000.0f / fps;
+    
+    // Apply 180° shutter rule: exposure = frame_period / 2
+    float exposure_ms = frame_period_ms / 2.0f;
+    
+    // Round to nearest integer and ensure minimum of 1ms
+    int exposure = (int)(exposure_ms + 0.5f);
+    if (exposure < 1) exposure = 1;
+    
+    return exposure;
+}
+
+/**
+ * Calculate optimal exposure time for racing mode
+ * Uses 180° shutter rule with frame rate from racing_fps
+ * 
+ * @return Calculated exposure time in milliseconds
+ */
+static int calculate_racing_exposure(void) {
+    return calculate_exposure_from_fps(racing_fps);
+}
+
+/**
+ * Calculate optimal exposure time for normal mode
+ * Uses 180° shutter rule with frame rate from fps
+ * 
+ * @return Calculated exposure time in milliseconds
+ */
+static int calculate_normal_exposure(void) {
+    return calculate_exposure_from_fps(fps);
+}
+
+// =============================================================================
 // RUNTIME CONFIGURATION FUNCTIONS
 // =============================================================================
 
-// Function to update signal thresholds during flight
-void update_signal_thresholds(int high_rssi, int medium_rssi, int low_rssi, 
-                             int vlq_max, int vlq_min, int dbm_high, 
-                             int dbm_medium, int dbm_low) {
-    HIGH_RSSI_THRESHOLD = high_rssi;
-    MEDIUM_RSSI_THRESHOLD = medium_rssi;
-    LOW_RSSI_THRESHOLD = low_rssi;
-    VLQ_MAX_THRESHOLD = vlq_max;
-    VLQ_MIN_THRESHOLD = vlq_min;
-    DBM_THRESHOLD_HIGH = dbm_high;
-    DBM_THRESHOLD_MEDIUM = dbm_medium;
-    DBM_THRESHOLD_LOW = dbm_low;
-    
-#ifdef DEBUG
-    printf("Signal thresholds updated: RSSI(%d/%d/%d) VLQ(%d/%d) dBm(%d/%d/%d)\n",
-           high_rssi, medium_rssi, low_rssi, vlq_max, vlq_min, 
-           dbm_high, dbm_medium, dbm_low);
-#endif
-}
-
-// Function to update PID parameters during flight
-void update_pid_parameters(float kp, float ki, float kd) {
-    pid_kp = kp;
-    pid_ki = ki;
-    pid_kd = kd;
-    
-#ifdef DEBUG
-    printf("PID parameters updated: Kp=%.2f Ki=%.2f Kd=%.2f\n", kp, ki, kd);
-#endif
-}
-
-// Function to update system parameters during flight
-void update_system_parameters(int safety_margin, int http_timeout, 
-                             int realtime_priority, int bitrate_multiplier) {
-    SAFETY_MARGIN_DBM = safety_margin;
-    HTTP_TIMEOUT_US = http_timeout;
-    REALTIME_PRIORITY = realtime_priority;
-    BITRATE_MBPS_TO_KBPS = bitrate_multiplier;
-    
-#ifdef DEBUG
-    printf("System parameters updated: Safety=%ddBm HTTP=%dus Priority=%d Multiplier=%d\n",
-           safety_margin, http_timeout, realtime_priority, bitrate_multiplier);
-#endif
-}
+// =============================================================================
 
 // Function declarations
 unsigned long get_current_time_ms(void);
-void cleanup_memory_maps(void);
 
 // Kalman Filter Structure
 typedef struct {
@@ -208,7 +331,6 @@ typedef struct {
     unsigned int high_perf_mode_ms;   // Additional sleep for high performance mode (milliseconds)
     unsigned int ultra_low_mode_ms;   // Additional sleep for ultra-low latency mode (milliseconds)
     unsigned int error_condition_ms; // Sleep when RSSI=0 or driver unavailable (milliseconds)
-    unsigned int startup_delay_s;     // Startup delay (seconds)
     int smart_sleep_enabled;          // Enable/disable smart sleep (0=off, 1=on)
 } sleep_config_t;
 
@@ -352,12 +474,20 @@ static filter_chain_t dbm_race_filter_chain = {
 float apply_filter_chain(filter_chain_t *chain, float sample);
 void set_filter_chain(const char *config_str, filter_chain_t *chain);
 void reset_filter_chain(filter_chain_t *chain);
+void init_filter_chain_filters(filter_chain_t *chain, float process_var, float measure_var,
+                               float lpf_cutoff_freq, float lpf_sample_freq, bool is_rssi);
+void init_debug_output(void);
+void init_cooldown_check(void);
+bool should_change_bitrate(int new_bitrate, int current_bitrate, unsigned long strict_cooldown_ms, 
+                          unsigned long up_cooldown_ms, int min_change_percent, unsigned long emergency_cooldown_ms);
 void toggle_racemode(void);
 int toggle_racemode_http(void);
 void disable_autopower(void);
+void set_maximum_tx_power(void);
 void setup_driver_power_management(void);
 void enable_pit_mode(void);
 void disable_pit_mode(void);
+void toggle_pit_mode(void);
 int toggle_pit_mode_http(void);
 int http_get(const char *path);
 
@@ -382,6 +512,15 @@ void init_rssi_read_method();
 void init_control_algorithm();
 int pid_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid);
 int fifo_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid);
+
+// PIT mode function prototypes
+void init_pit_mode();
+void pit_mode_enable_8812au(void);
+void pit_mode_disable_8812au(void);
+void pit_mode_enable_8812eu2(void);
+void pit_mode_disable_8812eu2(void);
+void pit_mode_enable_873xbu(void);
+void pit_mode_disable_873xbu(void);
 
 // RSSI format parser prototypes
 int parse_rssi_8812eu_format(const char *buffer);
@@ -453,6 +592,54 @@ static int (*dbm_format_parser)(const char *) = NULL;
 // Function pointer for control algorithm (set once during init)
 static int (*control_algorithm_function)(int, int, pid_controller_t*) = NULL;
 
+// Function pointer for PIT mode operations (set once during init)
+static void (*pit_mode_function)(void) = NULL;
+
+// Function pointer for debug output (set once during init)
+static void (*debug_output_function)(int, int, int) = NULL;
+
+// Function pointer for cooldown logic (set once during init)
+static bool (*cooldown_check_function)(int, int, unsigned long, unsigned long, int, unsigned long) = NULL;
+
+// Debug output functions (optimized - no runtime conditionals)
+static void debug_output_pid(int target_bitrate, int last_bitrate, int bitrate) {
+    GLOBAL_DEBUG_BUILD(true, "PID: T=%d C=%d F=%d ", target_bitrate, last_bitrate, bitrate);
+}
+
+static void debug_output_fifo(int target_bitrate, int last_bitrate, int bitrate) {
+    GLOBAL_DEBUG_BUILD(true, "FIFO: T=%d F=%d ", target_bitrate, bitrate);
+}
+
+// Initialize debug output function pointer (call once at startup)
+void init_debug_output() {
+    if (control_algorithm == CONTROL_ALGORITHM_PID) {
+        debug_output_function = debug_output_pid;
+    } else {
+        debug_output_function = debug_output_fifo;
+    }
+}
+
+// Cooldown check functions (optimized - no runtime conditionals)
+static bool cooldown_check_disabled(int bitrate, int last_bitrate, unsigned long strict_cooldown_ms, 
+                                   unsigned long up_cooldown_ms, int min_change_percent, unsigned long emergency_cooldown_ms) {
+    (void)strict_cooldown_ms; (void)up_cooldown_ms; (void)min_change_percent; (void)emergency_cooldown_ms;
+    return true; // Always allow bitrate changes when cooldown is disabled
+}
+
+static bool cooldown_check_enabled(int bitrate, int last_bitrate, unsigned long strict_cooldown_ms, 
+                                  unsigned long up_cooldown_ms, int min_change_percent, unsigned long emergency_cooldown_ms) {
+    return should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms);
+}
+
+// Initialize cooldown check function pointer (call once at startup)
+void init_cooldown_check() {
+    if (cooldown_enabled == 0) {
+        cooldown_check_function = cooldown_check_disabled;
+    } else {
+        cooldown_check_function = cooldown_check_enabled;
+    }
+}
+
 // Initialize sleep value and function pointer (call once at startup)
 void init_sleep_values() {
     // Set sleep value based on wifi_performance_mode (never changes during runtime)
@@ -510,13 +697,6 @@ void smart_sleep(bool is_error_condition, bool has_work_done) {
 // Unified sleep function - uses pre-calculated function pointer for maximum performance
 void unified_sleep(bool is_error_condition, bool has_work_done) {
     sleep_function(is_error_condition, has_work_done);
-}
-
-// Startup delay function
-void startup_delay() {
-    printf("Starting up... allowing %d seconds for SSH connections\n", sleep_config.startup_delay_s);
-    sleep(sleep_config.startup_delay_s);
-    printf("Startup complete - beginning adaptive link control\n");
 }
 
 // Generic popen() helper function to replace system() calls
@@ -720,6 +900,39 @@ void init_control_algorithm() {
     }
 }
 
+// Initialize PIT mode function pointer (call once at startup)
+void init_pit_mode() {
+    // Set function pointer based on WiFi card type and PIT mode configuration (never changes during runtime)
+    if (strcmp(wificard, "8812au") == 0) {
+        if (pit_mode_enabled) {
+            pit_mode_function = pit_mode_enable_8812au;
+            printf("PIT mode: RTL8812AU ENABLED (low power standby)\n");
+        } else {
+            pit_mode_function = pit_mode_disable_8812au;
+            printf("PIT mode: RTL8812AU DISABLED (full power FPV)\n");
+        }
+    } else if (strcmp(wificard, "8812eu2") == 0) {
+        if (pit_mode_enabled) {
+            pit_mode_function = pit_mode_enable_8812eu2;
+            printf("PIT mode: RTL8812EU ENABLED (low power standby)\n");
+        } else {
+            pit_mode_function = pit_mode_disable_8812eu2;
+            printf("PIT mode: RTL8812EU DISABLED (full power FPV)\n");
+        }
+    } else if (strcmp(wificard, "873xbu") == 0) {
+        if (pit_mode_enabled) {
+            pit_mode_function = pit_mode_enable_873xbu;
+            printf("PIT mode: RTL873xBU ENABLED (low power standby)\n");
+        } else {
+            pit_mode_function = pit_mode_disable_873xbu;
+            printf("PIT mode: RTL873xBU DISABLED (full power FPV)\n");
+        }
+    } else {
+        printf("PIT mode: ERROR - Unknown WiFi card type: %s\n", wificard);
+        return;
+    }
+}
+
 // Global sleep configuration (not static - needs to persist and be accessible)
 sleep_config_t sleep_config = {
     .main_loop_us = 100,        // 0.1ms base loop
@@ -727,7 +940,6 @@ sleep_config_t sleep_config = {
     .high_perf_mode_ms = 5,     // +5ms for high performance
     .ultra_low_mode_ms = 0,     // No extra sleep for ultra-low latency
     .error_condition_ms = 100, // 100ms for error conditions
-    .startup_delay_s = 5,       // 5 seconds startup delay
     .smart_sleep_enabled = 0    // Default: simple sleep (off)
 };
 
@@ -1304,53 +1516,105 @@ void toggle_racemode(void) {
     }
 }
 
-// Initialize filters with custom parameters
+// Initialize only the filters that are actually used in the active filter chains
 void init_filters(float rssi_process_var, float rssi_measure_var,
                  float dbm_process_var, float dbm_measure_var,
                  float lpf_cutoff_freq, float lpf_sample_freq) {
     
-    // Initialize Kalman filters
-    rssi_filter.process_variance = rssi_process_var;
-    rssi_filter.measurement_variance = rssi_measure_var;
-    rssi_filter.estimate = DEFAULT_RSSI_ESTIMATE;  // Reset to initial value
-    rssi_filter.error_estimate = DEFAULT_ERROR_ESTIMATE;
-    
-    dbm_filter.process_variance = dbm_process_var;
-    dbm_filter.measurement_variance = dbm_measure_var;
-    dbm_filter.estimate = DEFAULT_DBM_ESTIMATE;  // Reset to initial value
-    dbm_filter.error_estimate = DEFAULT_ERROR_ESTIMATE;
-    
-    // Initialize Low-Pass filters
-    init_lowpass_filter(&rssi_lpf, lpf_cutoff_freq, lpf_sample_freq);
-    init_lowpass_filter(&dbm_lpf, lpf_cutoff_freq, lpf_sample_freq);
-    
-    // Initialize Mode filters (no parameters needed)
-    rssi_mode_filter.return_element = DEFAULT_MODE_FILTER_RETURN_ELEMENT;
-    dbm_mode_filter.return_element = DEFAULT_MODE_FILTER_RETURN_ELEMENT;
+    // Only initialize filters if the active filter chains are properly set
+    if (active_rssi_filter_chain && active_dbm_filter_chain) {
+        // Initialize filters based on active filter chains
+        init_filter_chain_filters(active_rssi_filter_chain, rssi_process_var, rssi_measure_var, 
+                                  lpf_cutoff_freq, lpf_sample_freq, true);
+        init_filter_chain_filters(active_dbm_filter_chain, dbm_process_var, dbm_measure_var, 
+                                  lpf_cutoff_freq, lpf_sample_freq, false);
+        
 #ifdef DEBUG
-    printf("Mode filters initialized with return element: %d\n", DEFAULT_MODE_FILTER_RETURN_ELEMENT);
-#endif    
-#ifdef DEBUG
-    printf("Derivative filters initialized\n");
+        printf("Active filter chains initialized successfully\n");
 #endif
+    } else {
+        printf("WARNING: Active filter chains not set - skipping filter initialization\n");
+    }
+}
 
-    init_2pole_lpf(&rssi_2pole_lpf, lpf_cutoff_freq, lpf_sample_freq);
-    init_2pole_lpf(&dbm_2pole_lpf, lpf_cutoff_freq, lpf_sample_freq);
+// Initialize filters for a specific filter chain (optimized for performance)
+void init_filter_chain_filters(filter_chain_t *chain, float process_var, float measure_var,
+                               float lpf_cutoff_freq, float lpf_sample_freq, bool is_rssi) {
+    // Early exit if chain is not enabled or has no filters
+    if (!chain || !chain->enabled || chain->filter_count == 0) {
+        return;
+    }
     
-    // Initialize Mean filters (no parameters needed)
+    // Only initialize the specific filter types that are configured
+    for (uint8_t i = 0; i < chain->filter_count; i++) {
+        filter_type_t filter_type = chain->filters[i];
+        
+        switch (filter_type) {
+            case FILTER_TYPE_KALMAN: {
+                kalman_filter_t *filter = is_rssi ? &rssi_filter : &dbm_filter;
+                filter->process_variance = process_var;
+                filter->measurement_variance = measure_var;
+                filter->estimate = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
+                filter->error_estimate = DEFAULT_ERROR_ESTIMATE;
 #ifdef DEBUG
-    printf("Mean filters initialized\n");
+                printf("Kalman filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
 #endif
-    
-    // Initialize Gaussian filters (pre-calculate weights for performance)
-    init_gaussian_weights(&rssi_gaussian_filter);
-    init_gaussian_weights(&dbm_gaussian_filter);
+                break;
+            }
+            
+            case FILTER_TYPE_LOWPASS: {
+                lowpass_filter_t *filter = is_rssi ? &rssi_lpf : &dbm_lpf;
+                init_lowpass_filter(filter, lpf_cutoff_freq, lpf_sample_freq);
 #ifdef DEBUG
-    printf("Gaussian filters initialized\n");
-#endif 
-#ifdef DEBUG
-    printf("All filter types initialized successfully\n");
+                printf("Low-pass filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
 #endif
+                break;
+            }
+            
+            case FILTER_TYPE_MODE: {
+                mode_filter_t *filter = is_rssi ? &rssi_mode_filter : &dbm_mode_filter;
+                filter->return_element = DEFAULT_MODE_FILTER_RETURN_ELEMENT;
+#ifdef DEBUG
+                printf("Mode filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
+#endif
+                break;
+            }
+            
+            case FILTER_TYPE_DERIVATIVE: {
+                // Derivative filters are initialized by default
+#ifdef DEBUG
+                printf("Derivative filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
+#endif
+                break;
+            }
+            
+            case FILTER_TYPE_2POLE_LPF: {
+                lpf_2pole_t *filter = is_rssi ? &rssi_2pole_lpf : &dbm_2pole_lpf;
+                init_2pole_lpf(filter, lpf_cutoff_freq, lpf_sample_freq);
+#ifdef DEBUG
+                printf("2-Pole LPF initialized for %s\n", is_rssi ? "RSSI" : "dBm");
+#endif
+                break;
+            }
+            
+            case FILTER_TYPE_MEAN: {
+                // Mean filters are initialized by default
+#ifdef DEBUG
+                printf("Mean filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
+#endif
+                break;
+            }
+            
+            case FILTER_TYPE_GAUSSIAN: {
+                gaussian_filter_t *filter = is_rssi ? &rssi_gaussian_filter : &dbm_gaussian_filter;
+                init_gaussian_weights(filter);
+#ifdef DEBUG
+                printf("Gaussian filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
+#endif
+                break;
+            }
+        }
+    }
 }
 
 // Reset all filters
@@ -1364,15 +1628,7 @@ void reset_filters() {
 #endif
 }
 
-// Cleanup function for memory-mapped files
-void cleanup_memory_maps() {
-    // Note: We can't easily clean up the static variables in get_dbm() and get_rssi()
-    // because they're static and we don't have direct access to them here.
-    // The OS will clean up memory maps when the process exits.
-#ifdef DEBUG
-    printf("Memory maps cleanup completed\n");
-#endif
-}
+
 
 // Get current time in milliseconds
 unsigned long get_current_time_ms() {
@@ -1549,6 +1805,45 @@ void disable_autopower() {
     }
 }
 
+// Set WiFi transmission power to maximum for maximum range
+// Critical for FPV applications where range is essential
+void set_maximum_tx_power(void) {
+    if (!enable_maximum_tx_power) {
+        printf("Maximum TX power is DISABLED - This may limit your FPV range!\n");
+        printf("Enable enable_maximum_tx_power=1 in config for maximum range\n");
+        return;
+    }
+    
+    char command[128];
+    int result;
+    
+    if (strcmp(wificard, "8812au") == 0) {
+        // RTL8812AU: Set maximum TX power (typically 30 dBm)
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+        printf("Setting maximum TX power for RTL8812AU (30 dBm)...\n");
+    } else if (strcmp(wificard, "8812eu2") == 0) {
+        // RTL8812EU: Set maximum TX power (typically 30 dBm)
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+        printf("Setting maximum TX power for RTL8812EU (30 dBm)...\n");
+    } else if (strcmp(wificard, "873xbu") == 0) {
+        // RTL873xBU: Set maximum TX power (typically 20 dBm)
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 20");
+        printf("Setting maximum TX power for RTL873xBU (20 dBm)...\n");
+    } else {
+        printf("ERROR: Unknown WiFi card type for TX power: %s\n", wificard);
+        return;
+    }
+    
+    result = execute_command(command);
+    if (result != 0) {
+        printf("Warning: Failed to set maximum TX power (status %d)\n", result);
+        printf("Command attempted: %s\n", command);
+        printf("This may limit your FPV range\n");
+    } else {
+        printf("Maximum TX power SET - Optimized for maximum FPV range\n");
+    }
+}
+
 // Setup driver-level power management for both RTL8812AU and RTL8812EU
 // This provides additional protection beyond iw commands
 void setup_driver_power_management(void) {
@@ -1620,32 +1915,34 @@ void setup_driver_power_management(void) {
 // Enable PIT mode: Low power standby with HTTP wake-up capability
 // Perfect for battery conservation during racing events or standby periods
 void enable_pit_mode(void) {
-    if (pit_mode_enabled) {
-        printf("PIT MODE: ENABLED - Low power standby with HTTP wake-up\n");
-        printf("System will enter low power state but remain responsive to HTTP calls\n");
-        
-        // Enable power saving for PIT mode (temporary)
-        char command[128];
-        if (strcmp(wificard, "8812au") == 0) {
-            snprintf(command, sizeof(command), "iw wlan0 set power_save on");
-            printf("PIT MODE: Enabling power saving for RTL8812AU (8812au driver)...\n");
-        } else if (strcmp(wificard, "8812eu2") == 0) {
-            snprintf(command, sizeof(command), "iw wlan0 set power_save on");
-            printf("PIT MODE: Enabling power saving for RTL8812EU (8812eu2 driver)...\n");
-        } else if (strcmp(wificard, "873xbu") == 0) {
-            snprintf(command, sizeof(command), "iw wlan0 set power_save on");
-            printf("PIT MODE: Enabling power saving for RTL873xBU (873xbu driver)...\n");
-        }
-        
-        int result = execute_command(command);
-        if (result == 0) {
-            printf("PIT MODE: Power saving ENABLED for battery conservation\n");
-            printf("PIT MODE: System ready for HTTP wake-up calls\n");
-        } else {
-            printf("PIT MODE: Warning - Failed to enable power saving\n");
-        }
+    printf("PIT MODE: ENABLED - Low power standby with HTTP wake-up\n");
+    printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
+    
+    // Reduce TX power for PIT mode (battery conservation)
+    char command[128];
+    if (strcmp(wificard, "8812au") == 0) {
+        // RTL8812AU: Reduce to 10 dBm for PIT mode (vs 30 dBm max)
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
+        printf("PIT MODE: Reducing TX power for RTL8812AU to 10 dBm (battery conservation)...\n");
+    } else if (strcmp(wificard, "8812eu2") == 0) {
+        // RTL8812EU: Reduce to 10 dBm for PIT mode (vs 30 dBm max)
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
+        printf("PIT MODE: Reducing TX power for RTL8812EU to 10 dBm (battery conservation)...\n");
+    } else if (strcmp(wificard, "873xbu") == 0) {
+        // RTL873xBU: Reduce to 5 dBm for PIT mode (vs 20 dBm max)
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 5");
+        printf("PIT MODE: Reducing TX power for RTL873xBU to 5 dBm (battery conservation)...\n");
     } else {
-        printf("PIT MODE: DISABLED - Full power mode active\n");
+        printf("PIT MODE: ERROR - Unknown WiFi card type: %s\n", wificard);
+        return;
+    }
+    
+    int result = execute_command(command);
+    if (result == 0) {
+        printf("PIT MODE: TX power REDUCED for battery conservation\n");
+        printf("PIT MODE: System ready for HTTP wake-up calls\n");
+    } else {
+        printf("PIT MODE: Warning - Failed to reduce TX power\n");
     }
 }
 
@@ -1654,25 +1951,175 @@ void enable_pit_mode(void) {
 void disable_pit_mode(void) {
     printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
     
-    // Disable power saving for full FPV performance
+    // Restore maximum TX power for full FPV performance
     char command[128];
     if (strcmp(wificard, "8812au") == 0) {
-        snprintf(command, sizeof(command), "iw wlan0 set power_save off");
-        printf("PIT MODE: Disabling power saving for RTL8812AU (8812au driver)...\n");
+        // RTL8812AU: Restore to maximum 30 dBm
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+        printf("PIT MODE: Restoring maximum TX power for RTL8812AU to 30 dBm...\n");
     } else if (strcmp(wificard, "8812eu2") == 0) {
-        snprintf(command, sizeof(command), "iw wlan0 set power_save off");
-        printf("PIT MODE: Disabling power saving for RTL8812EU (8812eu2 driver)...\n");
+        // RTL8812EU: Restore to maximum 30 dBm
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+        printf("PIT MODE: Restoring maximum TX power for RTL8812EU to 30 dBm...\n");
     } else if (strcmp(wificard, "873xbu") == 0) {
-        snprintf(command, sizeof(command), "iw wlan0 set power_save off");
-        printf("PIT MODE: Disabling power saving for RTL873xBU (873xbu driver)...\n");
+        // RTL873xBU: Restore to maximum 20 dBm
+        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 20");
+        printf("PIT MODE: Restoring maximum TX power for RTL873xBU to 20 dBm...\n");
+    } else {
+        printf("PIT MODE: ERROR - Unknown WiFi card type: %s\n", wificard);
+        return;
     }
     
     int result = execute_command(command);
     if (result == 0) {
-        printf("PIT MODE: Power saving DISABLED - Full FPV performance restored\n");
+        printf("PIT MODE: Maximum TX power RESTORED for full FPV performance\n");
+        printf("PIT MODE: System ready for full power FPV operation\n");
     } else {
-        printf("PIT MODE: Warning - Failed to disable power saving\n");
+        printf("PIT MODE: Warning - Failed to restore maximum TX power\n");
     }
+}
+
+// PIT Mode Function Pointer Functions - Card Specific
+// RTL8812AU PIT mode functions
+void pit_mode_enable_8812au(void) {
+    printf("PIT MODE: ENABLED - Low power standby with HTTP wake-up\n");
+    printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
+    
+    char command[128];
+    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
+    printf("PIT MODE: Reducing TX power for RTL8812AU to 10 dBm (battery conservation)...\n");
+    
+    int result = execute_command(command);
+    if (result == 0) {
+        printf("PIT MODE: TX power REDUCED for battery conservation\n");
+        printf("PIT MODE: System ready for HTTP wake-up calls\n");
+    } else {
+        printf("PIT MODE: Warning - Failed to reduce TX power\n");
+    }
+}
+
+void pit_mode_disable_8812au(void) {
+    printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
+    
+    char command[128];
+    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+    printf("PIT MODE: Restoring maximum TX power for RTL8812AU to 30 dBm...\n");
+    
+    int result = execute_command(command);
+    if (result == 0) {
+        printf("PIT MODE: Maximum TX power RESTORED for full FPV performance\n");
+        printf("PIT MODE: System ready for full power FPV operation\n");
+    } else {
+        printf("PIT MODE: Warning - Failed to restore maximum TX power\n");
+    }
+}
+
+// RTL8812EU PIT mode functions
+void pit_mode_enable_8812eu2(void) {
+    printf("PIT MODE: ENABLED - Low power standby with HTTP wake-up\n");
+    printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
+    
+    char command[128];
+    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
+    printf("PIT MODE: Reducing TX power for RTL8812EU to 10 dBm (battery conservation)...\n");
+    
+    int result = execute_command(command);
+    if (result == 0) {
+        printf("PIT MODE: TX power REDUCED for battery conservation\n");
+        printf("PIT MODE: System ready for HTTP wake-up calls\n");
+    } else {
+        printf("PIT MODE: Warning - Failed to reduce TX power\n");
+    }
+}
+
+void pit_mode_disable_8812eu2(void) {
+    printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
+    
+    char command[128];
+    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+    printf("PIT MODE: Restoring maximum TX power for RTL8812EU to 30 dBm...\n");
+    
+    int result = execute_command(command);
+    if (result == 0) {
+        printf("PIT MODE: Maximum TX power RESTORED for full FPV performance\n");
+        printf("PIT MODE: System ready for full power FPV operation\n");
+    } else {
+        printf("PIT MODE: Warning - Failed to restore maximum TX power\n");
+    }
+}
+
+// RTL873xBU PIT mode functions
+void pit_mode_enable_873xbu(void) {
+    printf("PIT MODE: ENABLED - Low power standby with HTTP wake-up\n");
+    printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
+    
+    char command[128];
+    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 5");
+    printf("PIT MODE: Reducing TX power for RTL873xBU to 5 dBm (battery conservation)...\n");
+    
+    int result = execute_command(command);
+    if (result == 0) {
+        printf("PIT MODE: TX power REDUCED for battery conservation\n");
+        printf("PIT MODE: System ready for HTTP wake-up calls\n");
+    } else {
+        printf("PIT MODE: Warning - Failed to reduce TX power\n");
+    }
+}
+
+void pit_mode_disable_873xbu(void) {
+    printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
+    
+    char command[128];
+    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 20");
+    printf("PIT MODE: Restoring maximum TX power for RTL873xBU to 20 dBm...\n");
+    
+    int result = execute_command(command);
+    if (result == 0) {
+        printf("PIT MODE: Maximum TX power RESTORED for full FPV performance\n");
+        printf("PIT MODE: System ready for full power FPV operation\n");
+    } else {
+        printf("PIT MODE: Warning - Failed to restore maximum TX power\n");
+    }
+}
+
+// Simple toggle function for PIT mode (no HTTP required)
+// Can be called directly for testing or manual control
+void toggle_pit_mode(void) {
+    // Toggle PIT mode state
+    pit_mode_enabled = !pit_mode_enabled;
+    
+    // Update function pointer based on new state and WiFi card type
+    if (strcmp(wificard, "8812au") == 0) {
+        if (pit_mode_enabled) {
+            pit_mode_function = pit_mode_enable_8812au;
+            printf("PIT MODE: RTL8812AU ENABLED via toggle\n");
+        } else {
+            pit_mode_function = pit_mode_disable_8812au;
+            printf("PIT MODE: RTL8812AU DISABLED via toggle\n");
+        }
+    } else if (strcmp(wificard, "8812eu2") == 0) {
+        if (pit_mode_enabled) {
+            pit_mode_function = pit_mode_enable_8812eu2;
+            printf("PIT MODE: RTL8812EU ENABLED via toggle\n");
+        } else {
+            pit_mode_function = pit_mode_disable_8812eu2;
+            printf("PIT MODE: RTL8812EU DISABLED via toggle\n");
+        }
+    } else if (strcmp(wificard, "873xbu") == 0) {
+        if (pit_mode_enabled) {
+            pit_mode_function = pit_mode_enable_873xbu;
+            printf("PIT MODE: RTL873xBU ENABLED via toggle\n");
+        } else {
+            pit_mode_function = pit_mode_disable_873xbu;
+            printf("PIT MODE: RTL873xBU DISABLED via toggle\n");
+        }
+    } else {
+        printf("PIT MODE: ERROR - Unknown WiFi card type: %s\n", wificard);
+        return;
+    }
+    
+    // Execute the appropriate function
+    pit_mode_function();
 }
 
 // HTTP API endpoint for toggling PIT mode
@@ -1686,19 +2133,42 @@ int toggle_pit_mode_http(void) {
         // Toggle PIT mode state
         pit_mode_enabled = !pit_mode_enabled;
         
-        if (pit_mode_enabled) {
-            printf("HTTP API: PIT MODE ENABLED via HTTP call\n");
-            enable_pit_mode();
-#ifdef DEBUG
-            GLOBAL_DEBUG_BUILD(true, "HTTP: PIT mode ENABLED ");
-#endif
+        // Update function pointer based on new state and WiFi card type
+        if (strcmp(wificard, "8812au") == 0) {
+            if (pit_mode_enabled) {
+                pit_mode_function = pit_mode_enable_8812au;
+                printf("HTTP API: PIT MODE RTL8812AU ENABLED via HTTP call\n");
+            } else {
+                pit_mode_function = pit_mode_disable_8812au;
+                printf("HTTP API: PIT MODE RTL8812AU DISABLED via HTTP call\n");
+            }
+        } else if (strcmp(wificard, "8812eu2") == 0) {
+            if (pit_mode_enabled) {
+                pit_mode_function = pit_mode_enable_8812eu2;
+                printf("HTTP API: PIT MODE RTL8812EU ENABLED via HTTP call\n");
+            } else {
+                pit_mode_function = pit_mode_disable_8812eu2;
+                printf("HTTP API: PIT MODE RTL8812EU DISABLED via HTTP call\n");
+            }
+        } else if (strcmp(wificard, "873xbu") == 0) {
+            if (pit_mode_enabled) {
+                pit_mode_function = pit_mode_enable_873xbu;
+                printf("HTTP API: PIT MODE RTL873xBU ENABLED via HTTP call\n");
+            } else {
+                pit_mode_function = pit_mode_disable_873xbu;
+                printf("HTTP API: PIT MODE RTL873xBU DISABLED via HTTP call\n");
+            }
         } else {
-            printf("HTTP API: PIT MODE DISABLED via HTTP call\n");
-            disable_pit_mode();
-#ifdef DEBUG
-            GLOBAL_DEBUG_BUILD(true, "HTTP: PIT mode DISABLED ");
-#endif
+            printf("HTTP API: PIT MODE ERROR - Unknown WiFi card type: %s\n", wificard);
+            return -1;
         }
+        
+        // Execute the appropriate function
+        pit_mode_function();
+        
+#ifdef DEBUG
+        GLOBAL_DEBUG_BUILD(true, "HTTP: PIT mode %s ", pit_mode_enabled ? "ENABLED" : "DISABLED");
+#endif
         
         return 0;
     } else {
@@ -1813,48 +2283,6 @@ int toggle_racemode_http(void) {
     
     return result;
 }
-
-// Performance test function to demonstrate minimal impact of runtime configuration
-void performance_test_runtime_config() {
-    const int TEST_ITERATIONS = 1000000;  // 1 million iterations
-    struct timespec start, end;
-    double elapsed_time;
-    
-    printf("Performance Test: Runtime Configuration Impact\n");
-    printf("Testing %d iterations of high-frequency constant access...\n", TEST_ITERATIONS);
-    
-    // Test 1: Accessing runtime-configurable constants
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    int sum = 0;
-    for (int i = 0; i < TEST_ITERATIONS; i++) {
-        sum += HIGH_RSSI_THRESHOLD + MEDIUM_RSSI_THRESHOLD + LOW_RSSI_THRESHOLD +
-               VLQ_MAX_THRESHOLD + VLQ_MIN_THRESHOLD + PERCENTAGE_CONVERSION +
-               DBM_THRESHOLD_HIGH + DBM_THRESHOLD_MEDIUM + DBM_THRESHOLD_LOW;
-    }
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    
-    elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("Runtime-configurable constants: %.6f seconds (%.2f ns per access)\n", 
-           elapsed_time, elapsed_time * 1e9 / (TEST_ITERATIONS * 9));
-    
-    // Test 2: Accessing hardcoded values for comparison
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    sum = 0;
-    for (int i = 0; i < TEST_ITERATIONS; i++) {
-        sum += 55 + 40 + 20 + 100 + 1 + 100 + (-70) + (-55) + (-53);
-    }
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    
-    elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("Hardcoded values: %.6f seconds (%.2f ns per access)\n", 
-           elapsed_time, elapsed_time * 1e9 / (TEST_ITERATIONS * 9));
-    
-    printf("Performance impact: <0.1%% (negligible for FPV applications)\n");
-    printf("Sum (to prevent optimization): %d\n", sum);
-}
-
-
-
 
 // Worker thread infrastructure
 static pthread_t worker_thread;
@@ -1997,7 +2425,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
              int *signal_sampling_interval, unsigned long *emergency_cooldown,
-             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled) {
+             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled, int *enable_maximum_tx_power, int *auto_exposure_enabled) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -2136,6 +2564,14 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
             sscanf(line + 23, "%d", &disable_wifi_power_save);
             continue;
         }
+        if (strncmp(line, "enable_maximum_tx_power=", 23) == 0) {
+            sscanf(line + 23, "%d", enable_maximum_tx_power);
+            continue;
+        }
+        if (strncmp(line, "auto_exposure_enabled=", 22) == 0) {
+            sscanf(line + 22, "%d", auto_exposure_enabled);
+            continue;
+        }
         if (strncmp(line, "pit_mode_enabled=", 17) == 0) {
             sscanf(line + 17, "%d", &pit_mode_enabled);
             continue;
@@ -2163,10 +2599,6 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
         }
         if (strncmp(line, "sleep_error_condition_ms=", 26) == 0) {
             sscanf(line + 26, "%u", &sleep_config.error_condition_ms);
-            continue;
-        }
-        if (strncmp(line, "sleep_startup_delay_s=", 22) == 0) {
-            sscanf(line + 22, "%u", &sleep_config.startup_delay_s);
             continue;
         }
         if (strncmp(line, "smart_sleep_enabled=", 20) == 0) {
@@ -2468,11 +2900,10 @@ void mspLQ(int rssi_osd) {
     snprintf(command, sizeof(command),
              "echo \"VLQ %d &B &F60 &L30\" > /tmp/MSPOSD.msg",
               rssi_osd);
-              //RSSI PATTERN *** ** * 
 #ifdef DEBUG
     int result = execute_command(command);
     if (result != 0) {
-        printf("Warning: MSP OSD command failed with status %d\n", result);
+           GLOBAL_DEBUG_BUILD(true, "Warning: MSP OSD command failed with status %d ", result);
     }
 #else
     execute_command(command);
@@ -2493,11 +2924,6 @@ void set_bitrate_async(int bitrate_mbps) {
 }
 
 int main(int argc, char *argv[]) {
-    // Check for performance test command line argument
-    if (argc > 1 && strcmp(argv[1], "--performance-test") == 0) {
-        performance_test_runtime_config();
-        return 0;
-    }
     
     int bitrate = DEFAULT_BITRATE;
     int bitrate_min = DEFAULT_BITRATE_MIN;
@@ -2541,20 +2967,20 @@ int main(int argc, char *argv[]) {
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
            &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
-           &signal_sampling_freq_hz, &hardware_rssi_offset, &cooldown_enabled);
+           &signal_sampling_freq_hz, &hardware_rssi_offset, &cooldown_enabled, &enable_maximum_tx_power, &auto_exposure_enabled);
     
-    // Set and configure filter chains
-    set_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
-    set_filter_chain(dbm_filter_chain_config, &dbm_filter_chain);
-    set_filter_chain(racing_rssi_filter_chain_config, &rssi_race_filter_chain);
-    set_filter_chain(racing_dbm_filter_chain_config, &dbm_race_filter_chain);
-    
-    // Initialize active filter chains based on race_mode
+    // Set and configure filter chains based on race_mode
     if (race_mode) {
+        // Racing mode - only initialize racing filters
+        set_filter_chain(racing_rssi_filter_chain_config, &rssi_race_filter_chain);
+        set_filter_chain(racing_dbm_filter_chain_config, &dbm_race_filter_chain);
         active_rssi_filter_chain = &rssi_race_filter_chain;
         active_dbm_filter_chain = &dbm_race_filter_chain;
         printf("Racing mode ENABLED - Using low-pass filters for fast response\n");
     } else {
+        // Normal mode - only initialize normal filters
+        set_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
+        set_filter_chain(dbm_filter_chain_config, &dbm_filter_chain);
         active_rssi_filter_chain = &rssi_filter_chain;
         active_dbm_filter_chain = &dbm_filter_chain;
         printf("Normal mode ENABLED - Using Kalman filters for stability\n");
@@ -2568,49 +2994,24 @@ int main(int argc, char *argv[]) {
     pid_init(&bitrate_pid, pid_kp, pid_ki, pid_kd);
     printf("PID Controller initialized: Kp=%.2f, Ki=%.2f, Kd=%.2f\n", pid_kp, pid_ki, pid_kd);
     
-    // CRITICAL: Disable WiFi power saving for FPV stability
-    // Prevents connection drops during dynamic activities
-    disable_autopower();
-    
     // Setup driver-level power management (additional protection)
     setup_driver_power_management();
     
     // Initialize PIT mode based on configuration
     if (pit_mode_enabled) {
         printf("PIT MODE: Initializing low power standby mode\n");
-        enable_pit_mode();
+        pit_mode_function();  // Use function pointer
     } else {
         printf("PIT MODE: Full power FPV mode active\n");
+        pit_mode_function();  // Use function pointer
     }
     
     // Print WiFi power management configuration
     printf("WiFi power saving: %s\n", disable_wifi_power_save ? "DISABLED (recommended for FPV)" : "ENABLED (not recommended for FPV)");
     
-    // Set hardware-specific MCS offset during initialization
-    if (strcmp(wificard, "8812au") == 0) {
-        hardware_mcs_offset = 0;  // Most aggressive - maximum performance
-        hardware_mcs_low_cmd = 0x0c;    // Low MCS command
-        hardware_mcs_medium_cmd = 0x10; // Medium MCS command
-        hardware_mcs_high_cmd = 0xFF;   // High MCS command
-        printf("Hardware MCS: RTL8812AU - Aggressive thresholds (maximum performance)\n");
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        hardware_mcs_offset = 2;  // Most conservative - maximum stability
-        hardware_mcs_low_cmd = 0x08;    // Conservative low MCS command
-        hardware_mcs_medium_cmd = 0x0c; // Conservative medium MCS command
-        hardware_mcs_high_cmd = 0x10;   // Conservative high MCS command
-        printf("Hardware MCS: RTL8812EU - Conservative thresholds (+2 dBm, maximum stability)\n");
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        hardware_mcs_offset = 1;  // Balanced - optimal performance/stability
-        hardware_mcs_low_cmd = 0x0a;    // Balanced low MCS command
-        hardware_mcs_medium_cmd = 0x0e; // Balanced medium MCS command
-        hardware_mcs_high_cmd = 0x20;   // Balanced high MCS command
-        printf("Hardware MCS: RTL873xBU - Balanced thresholds (+1 dBm, optimal balance)\n");
-    } else {
-        hardware_mcs_offset = 0;  // Default fallback
-        hardware_mcs_low_cmd = 0x10;    // Default commands
-        hardware_mcs_medium_cmd = 0x10;
-        hardware_mcs_high_cmd = 0x10;
-        printf("Hardware MCS: Unknown - Using default thresholds\n");
+    // Initialize WiFi card with all configurations
+    if (!wifi_card_init(wificard, driverpath)) {
+        printf("WiFi card initialization failed - continuing with limited functionality\n");
     }
     
     // Print signal sampling configuration
@@ -2633,8 +3034,6 @@ int main(int argc, char *argv[]) {
     // Set real-time priority for ultra-high performance racing VTX
     set_realtime_priority();
     
-    // Frame sync removed - not needed for bitrate control
-    
     // Initialize signal sampling timing (independent of frame rate)
     long signal_sampling_interval_ns = 1000000000L / signal_sampling_freq_hz;  // Convert Hz to nanoseconds
     struct timespec last_signal_time = {0, 0};
@@ -2651,15 +3050,7 @@ int main(int argc, char *argv[]) {
     } else {
         printf("Cooldown system: DISABLED (immediate bitrate changes)\n");
     }
-    
-    // Frame sync removed - bitrate control runs independently
-    
-    // Print RSSI reading method
-    if (use_file_rewind_method) {
-        printf("RSSI reading method: File rewind\n");
-    } else {
-        printf("RSSI reading method: Memory mapping (mmap)\n");
-    }
+
     
     // Initialize pre-calculated sleep values for performance
     init_sleep_values();
@@ -2670,13 +3061,21 @@ int main(int argc, char *argv[]) {
     // Initialize control algorithm function pointer for performance
     init_control_algorithm();
     
+    // Initialize PIT mode function pointer for performance
+    init_pit_mode();
+    
+    // Initialize debug output function pointer for performance
+    init_debug_output();
+    
+    // Initialize cooldown check function pointer for performance
+    init_cooldown_check();
+    
     // Print sleep configuration
     printf("Sleep configuration:\n");
     printf("  Mode: %s\n", sleep_config.smart_sleep_enabled ? "Smart (adaptive)" : "Simple (fixed)");
     printf("  Base loop: %uus\n", sleep_config.main_loop_us);
     printf("  Sleep value: %uus (%.1fms)\n", sleep_value_us, sleep_value_us / 1000.0);
     printf("  Error conditions: %ums\n", sleep_config.error_condition_ms);
-    printf("  Startup delay: %us\n", sleep_config.startup_delay_s);
     
     // Initialize worker thread
     sem_init(&worker_sem, 0, 0);
@@ -2686,51 +3085,8 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
     
-    // Startup delay to allow SSH connections and system stabilization
-    startup_delay();
-
-    if (strcmp(NIC, "8812eu2") == 0) {
-        strcpy(driverpath, "/proc/net/rtl88x2eu/wlan0");
-#ifdef DEBUG
-        GLOBAL_DEBUG_BUILD(true, "DEBUG: Using driver path: %s ", driverpath);
-#endif
-    }
-    else if (strcmp(NIC, "8812au") == 0) {
-        strcpy(driverpath, "/proc/net/rtl88xxau/wlan0");
-#ifdef DEBUG
-        GLOBAL_DEBUG_BUILD(true, "DEBUG: Using driver path: %s ", driverpath);
-#endif
-    }
-    else if (strcmp(NIC, "873xbu") == 0) {
-        strcpy(driverpath, "/proc/net/rtl873xbu/wlan0");
-#ifdef DEBUG
-        GLOBAL_DEBUG_BUILD(true, "DEBUG: Using driver path: %s ", driverpath);
-#endif
-    }
-    else {
-        printf("ERROR: Unknown WiFi card: %s\n", NIC);
-        printf("Available options: 8812eu2, 8812au, 873xbu\n");
-        exit(1);
-    }
-    
-    // Check if driver path exists
-    char test_path[512];
-    snprintf(test_path, sizeof(test_path), "%s/sta_tp_info", driverpath);
-    if (access(test_path, R_OK) != 0) {
-        printf("ERROR: Driver path does not exist: %s\n", test_path);
-        printf("Please check your WiFi card configuration\n");
-        printf("Common solutions:\n");
-        printf("  1. Change wificard=8812au in config\n");
-        printf("  2. Check if WiFi is enabled: iwconfig\n");
-        printf("  3. Verify driver is loaded: lsmod | grep 88\n");
-        printf("System will continue with disabled bitrate control\n");
-        wifi_driver_available = 0;  // Mark WiFi driver as unavailable
-    } else {
-#ifdef DEBUG
-        GLOBAL_DEBUG_BUILD(true, "DEBUG: Driver path verified: %s ", test_path);
-#endif
-        wifi_driver_available = 1;  // Mark WiFi driver as available
-    }
+    // Startup complete - beginning adaptive link control immediately
+    printf("Startup complete - beginning adaptive link control\n");
     
     if (RaceMode != 1 && RaceMode != 0) {
         printf("invalid value for racemode\n");
@@ -2769,11 +3125,35 @@ int main(int argc, char *argv[]) {
         snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.fps=%d", racing_fps);
         http_get(video_config);
         
-        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", racing_exposure);
-        http_get(video_config);                
+        // Calculate optimal exposure based on frame rate (180° shutter rule)
+        int calculated_exposure = auto_exposure_enabled ? calculate_racing_exposure() : racing_exposure;
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", calculated_exposure);
+        http_get(video_config);
+        
+        if (auto_exposure_enabled) {
+            printf("Racing mode: Auto-calculated exposure %dms for %dfps (180° shutter guideline)\n", 
+                   calculated_exposure, racing_fps);
+            printf("NOTE: CMOS cameras can set exposure independently with rolling shutter- adjust manually if needed\n");
+        }                
         
     } else {
-        printf("racemode disable\n");
+        printf("Normal mode ENABLED\n");
+        
+        // Set normal mode video configuration
+        char video_config[256];
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.fps=%d", fps);
+        http_get(video_config);
+        
+        // Calculate optimal exposure based on frame rate (180° shutter rule)
+        int calculated_exposure = auto_exposure_enabled ? calculate_normal_exposure() : 8; // Default fallback
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", calculated_exposure);
+        http_get(video_config);
+        
+        if (auto_exposure_enabled) {
+            printf("Normal mode: Auto-calculated exposure %dms for %dfps (180° shutter guideline)\n", 
+                   calculated_exposure, fps);
+            printf("NOTE: CMOS cameras can set exposure independently with rolling shutter - adjust manually if needed\n");
+        }
     }
     
     // Enable global debug system after initialization is complete
@@ -2912,14 +3292,10 @@ int main(int argc, char *argv[]) {
             // Clamp VLQ between 0 and 100
             if ( currentDb > histeris || currentDb < minushisteris ) {
                 if (vlq > VLQ_MAX_THRESHOLD || rssi > HIGH_RSSI_THRESHOLD) {
-                    //system("wget -qO- \"http://localhost/api/v1/set?image.saturation=50\" > /dev/null 2>&1");
                     bitrate = bitrate_max;
                 }
             else if (vlq < VLQ_MIN_THRESHOLD || rssi < LOW_RSSI_THRESHOLD) {
                 bitrate = bitrate_min;
-
-                //BW 
-                //system("wget -qO- \"http://localhost/api/v1/set?image.saturation=0\" > /dev/null 2>&1");
             }
              else {
                 // Calculate target bitrate using VLQ
@@ -2930,12 +3306,7 @@ int main(int argc, char *argv[]) {
                 
 #ifdef DEBUG
                 if (new_signal_data) {
-                    if (control_algorithm == CONTROL_ALGORITHM_PID) {
-                        GLOBAL_DEBUG_BUILD(true, "PID: T=%d C=%d F=%d ", 
-                                   target_bitrate, last_bitrate, bitrate);
-                    } else {
-                        GLOBAL_DEBUG_BUILD(true, "FIFO: T=%d F=%d ", target_bitrate, bitrate);
-                    }
+                    debug_output_function(target_bitrate, last_bitrate, bitrate);
                 }
 #endif
                 
@@ -2945,8 +3316,8 @@ int main(int argc, char *argv[]) {
             }
             }
 
-            // Apply cooldown logic before changing bitrate (if enabled)
-            if (cooldown_enabled == 0 || should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms)) {
+            // Apply cooldown logic before changing bitrate (optimized - no runtime conditionals)
+            if (cooldown_check_function(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms)) {
                 set_bitrate_async(bitrate);
                 set_mcs_async(bitrate, driverpath);
                 
@@ -2983,9 +3354,6 @@ int main(int argc, char *argv[]) {
     sem_post(&worker_sem);  // Wake up worker to exit
     pthread_join(worker_thread, NULL);
     sem_destroy(&worker_sem);
-
-    // Cleanup memory maps
-    cleanup_memory_maps();
 
     return 0;
 }
