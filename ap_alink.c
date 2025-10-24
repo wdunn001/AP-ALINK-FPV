@@ -380,6 +380,8 @@ void init_rssi_read_method();
 
 // Control algorithm function prototypes
 void init_control_algorithm();
+int pid_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid);
+int fifo_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid);
 
 // RSSI format parser prototypes
 int parse_rssi_8812eu_format(const char *buffer);
