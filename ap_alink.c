@@ -375,12 +375,15 @@ void init_sleep_values();
 void enable_global_debug();
 
 // Global high-performance debug logging system
+#ifdef DEBUG
 static char global_debug_buffer[2048];  // Larger buffer for entire application
 static int global_debug_pos = 0;
 static int global_debug_iteration = 0;
+#endif
 static bool global_debug_enabled = false;  // Set to true after initialization
 
 // Global debug macros for entire application
+#ifdef DEBUG
 #define GLOBAL_DEBUG_RESET() global_debug_pos = 0
 #define GLOBAL_DEBUG_APPEND(fmt, ...) \
     if (global_debug_enabled) { \
@@ -398,6 +401,14 @@ static bool global_debug_enabled = false;  // Set to true after initialization
     if (global_debug_enabled && (condition)) { \
         GLOBAL_DEBUG_APPEND(fmt, ##__VA_ARGS__); \
     }
+#else
+// Dummy macros for non-debug builds
+#define GLOBAL_DEBUG_RESET()
+#define GLOBAL_DEBUG_APPEND(fmt, ...)
+#define GLOBAL_DEBUG_FLUSH()
+#define GLOBAL_DEBUG_THROTTLE(n) (0)
+#define GLOBAL_DEBUG_BUILD(condition, fmt, ...)
+#endif
 
 // Enable global debug after initialization is complete
 void enable_global_debug() {
@@ -1904,7 +1915,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
              int *signal_sampling_interval, unsigned long *emergency_cooldown,
-             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled, int *disable_wifi_power_save) {
+             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -2418,7 +2429,7 @@ int main(int argc, char *argv[]) {
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
            &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
-           &signal_sampling_freq_hz, &hardware_rssi_offset, &cooldown_enabled, &disable_wifi_power_save);
+           &signal_sampling_freq_hz, &hardware_rssi_offset, &cooldown_enabled);
     
     // Set and configure filter chains
     set_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
