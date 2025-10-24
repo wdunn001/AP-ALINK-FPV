@@ -96,8 +96,6 @@ static float kalman_rssi_process = DEFAULT_PROCESS_VARIANCE;
 static float kalman_dbm_process = DEFAULT_PROCESS_VARIANCE;
 static float kalman_rssi_measure = DEFAULT_RSSI_MEASUREMENT_VARIANCE;
 static float kalman_dbm_measure = DEFAULT_DBM_MEASUREMENT_VARIANCE;
-// Removed rssi_read_method - using use_file_rewind_method instead
-// Removed startup_delay_seconds - using sleep_config.startup_delay_s instead
 static int signal_sampling_interval = 5;
 static int signal_sampling_freq_hz = 50;
 static int cooldown_enabled = 0;
@@ -374,6 +372,25 @@ void unified_sleep(bool is_error_condition, bool has_work_done);
 void init_sleep_values();
 void enable_global_debug();
 
+// RSSI reading function prototypes
+int get_rssi_file_rewind(const char *readcmd);
+int get_rssi_mmap(const char *readcmd);
+int get_rssi(const char *readcmd);
+void init_rssi_read_method();
+
+// Control algorithm function prototypes
+void init_control_algorithm();
+
+// RSSI format parser prototypes
+int parse_rssi_8812eu_format(const char *buffer);
+int parse_rssi_8812au_format(const char *buffer);
+int parse_rssi_873xbu_format(const char *buffer);
+
+// dBm format parser prototypes
+int parse_dbm_8812eu_format(const char *buffer);
+int parse_dbm_8812au_format(const char *buffer);
+int parse_dbm_873xbu_format(const char *buffer);
+
 // Global high-performance debug logging system
 #ifdef DEBUG
 static char global_debug_buffer[2048];  // Larger buffer for entire application
@@ -422,6 +439,18 @@ static unsigned int sleep_value_us = 0; // Sleep value in microseconds
 // Function pointer for sleep function (set once during init)
 static void (*sleep_function)(bool, bool) = NULL;
 
+// Function pointer for RSSI reading method (set once during init)
+static int (*rssi_read_function)(const char *) = NULL;
+
+// Function pointer for RSSI format parser (set once during init)
+static int (*rssi_format_parser)(const char *) = NULL;
+
+// Function pointer for dBm format parser (set once during init)
+static int (*dbm_format_parser)(const char *) = NULL;
+
+// Function pointer for control algorithm (set once during init)
+static int (*control_algorithm_function)(int, int, pid_controller_t*) = NULL;
+
 // Initialize sleep value and function pointer (call once at startup)
 void init_sleep_values() {
     // Set sleep value based on wifi_performance_mode (never changes during runtime)
@@ -442,6 +471,7 @@ void init_sleep_values() {
         sleep_function = simple_sleep;
     }
 }
+
 
 // Simple sleep function - just sleep based on pre-calculated value
 void simple_sleep(bool is_error_condition, bool has_work_done) {
@@ -649,6 +679,44 @@ int use_file_rewind_method = 0;  // 0 = mmap (default), 1 = file rewind
 
 // Global WiFi driver availability flag
 int wifi_driver_available = 1;  // Assume available until proven otherwise
+
+// Initialize RSSI reading method function pointer (call once at startup)
+void init_rssi_read_method() {
+    // Set function pointer based on RSSI read method configuration (never changes during runtime)
+    if (use_file_rewind_method) {
+        rssi_read_function = get_rssi_file_rewind;
+    } else {
+        rssi_read_function = get_rssi_mmap;
+    }
+    
+    // Set format parser based on WiFi card type (never changes during runtime)
+    if (strcmp(wificard, "8812eu2") == 0) {
+        rssi_format_parser = parse_rssi_8812eu_format;
+        dbm_format_parser = parse_dbm_8812eu_format;
+    } else if (strcmp(wificard, "8812au") == 0) {
+        rssi_format_parser = parse_rssi_8812au_format;
+        dbm_format_parser = parse_dbm_8812au_format;
+    } else if (strcmp(wificard, "873xbu") == 0) {
+        rssi_format_parser = parse_rssi_873xbu_format;
+        dbm_format_parser = parse_dbm_873xbu_format;
+    } else {
+        // Default to 8812EU format
+        rssi_format_parser = parse_rssi_8812eu_format;
+        dbm_format_parser = parse_dbm_8812eu_format;
+    }
+}
+
+// Initialize control algorithm function pointer (call once at startup)
+void init_control_algorithm() {
+    // Set function pointer based on control algorithm configuration (never changes during runtime)
+    if (control_algorithm == CONTROL_ALGORITHM_PID) {
+        control_algorithm_function = pid_control_algorithm;
+        printf("Control algorithm: PID Controller (smooth transitions)\n");
+    } else {
+        control_algorithm_function = fifo_control_algorithm;
+        printf("Control algorithm: Simple FIFO (fast, direct)\n");
+    }
+}
 
 // Global sleep configuration (not static - needs to persist and be accessible)
 sleep_config_t sleep_config = {
@@ -1352,6 +1420,18 @@ void pid_reset(pid_controller_t *pid) {
 #ifdef DEBUG
     printf("PID controller reset\n");
 #endif
+}
+
+// Control Algorithm Functions
+// PID Controller: Smooth transitions with PID control
+int pid_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid) {
+    int pid_adjustment = pid_calculate(pid, target_bitrate, last_bitrate);
+    return last_bitrate + pid_adjustment;
+}
+
+// Simple FIFO: Direct assignment (faster, more responsive)
+int fifo_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid) {
+    return target_bitrate;  // Direct assignment
 }
 
 // Initialize PID controller with custom parameters
@@ -2144,7 +2224,84 @@ int get_dbm() {
 
 
 
-// Get dBm from sta_tp_info file (alternative to /proc/net/wireless)
+// Driver-specific format parsers (no more guessing!)
+int parse_rssi_8812eu_format(const char *buffer) {
+    // 8812EU driver format: "rssi : 85 %"
+    char *pos = strstr(buffer, "rssi");
+    if (pos) {
+        int rssi_percent;
+        if (sscanf(pos, "rssi : %d %%", &rssi_percent) == 1) {
+            return rssi_percent;
+        }
+    }
+    return 0;
+}
+
+int parse_rssi_8812au_format(const char *buffer) {
+    // 8812AU driver format: "rssi: 85 %"
+    char *pos = strstr(buffer, "rssi");
+    if (pos) {
+        int rssi_percent;
+        if (sscanf(pos, "rssi: %d %%", &rssi_percent) == 1) {
+            return rssi_percent;
+        }
+    }
+    return 0;
+}
+
+int parse_rssi_873xbu_format(const char *buffer) {
+    // 873xBU driver format: "signal: -45 dBm" (convert to percentage)
+    char *pos = strstr(buffer, "signal");
+    if (pos) {
+        int signal_dbm;
+        if (sscanf(pos, "signal: %d dBm", &signal_dbm) == 1) {
+            // Convert dBm to percentage: -30 dBm = 100%, -90 dBm = 0%
+            int rssi_percent = (signal_dbm + 90) * 100 / 60;
+            if (rssi_percent > 100) rssi_percent = 100;
+            if (rssi_percent < 0) rssi_percent = 0;
+            return rssi_percent;
+        }
+    }
+    return 0;
+}
+
+// Driver-specific dBm parsers (for backup method)
+int parse_dbm_8812eu_format(const char *buffer) {
+    // 8812EU driver format: "rssi : -45 dBm"
+    char *pos = strstr(buffer, "rssi");
+    if (pos) {
+        int rssi_dbm;
+        if (sscanf(pos, "rssi : %d dBm", &rssi_dbm) == 1) {
+            return rssi_dbm;
+        }
+    }
+    return -100;
+}
+
+int parse_dbm_8812au_format(const char *buffer) {
+    // 8812AU driver format: "rssi: -45 dBm"
+    char *pos = strstr(buffer, "rssi");
+    if (pos) {
+        int rssi_dbm;
+        if (sscanf(pos, "rssi: %d dBm", &rssi_dbm) == 1) {
+            return rssi_dbm;
+        }
+    }
+    return -100;
+}
+
+int parse_dbm_873xbu_format(const char *buffer) {
+    // 873xBU driver format: "signal: -45 dBm"
+    char *pos = strstr(buffer, "signal");
+    if (pos) {
+        int signal_dbm;
+        if (sscanf(pos, "signal: %d dBm", &signal_dbm) == 1) {
+            return signal_dbm;
+        }
+    }
+    return -100;
+}
+
 int get_dbm_from_sta_tp_info(const char *readcmd) {
     char path[512];
     int dbm = -100;
@@ -2161,23 +2318,8 @@ int get_dbm_from_sta_tp_info(const char *readcmd) {
     if (fread(buffer, 1, sizeof(buffer)-1, fp) > 0) {
         buffer[sizeof(buffer)-1] = '\0';
         
-        // Look for dBm value in various formats
-        char *pos;
-        if ((pos = strstr(buffer, "signal")) != NULL) {
-            int signal_dbm;
-            if (sscanf(pos, "signal : %d dBm", &signal_dbm) == 1 ||
-                sscanf(pos, "signal: %d dBm", &signal_dbm) == 1 ||
-                sscanf(pos, "signal=%d", &signal_dbm) == 1) {
-                dbm = signal_dbm;
-            }
-        } else if ((pos = strstr(buffer, "rssi")) != NULL) {
-            // Some drivers report RSSI in dBm
-            int rssi_dbm;
-            if (sscanf(pos, "rssi : %d dBm", &rssi_dbm) == 1 ||
-                sscanf(pos, "rssi: %d dBm", &rssi_dbm) == 1) {
-                dbm = rssi_dbm;
-            }
-        }
+        // Use driver-specific dBm parser (no more guessing!)
+        dbm = dbm_format_parser(buffer);
     }
     
     fclose(fp);
@@ -2205,8 +2347,9 @@ int get_rssi_file_rewind(const char *readcmd) {
         if (!fp) {
 #ifdef DEBUG
             perror("fopen");
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to open sta_tp_info file: %s ", path);
 #endif
-            return rssi_percent;
+            return -1;  // Return error code instead of 0 RSSI
         }
         strcpy(last_path, path);
     } else {
@@ -2215,34 +2358,13 @@ int get_rssi_file_rewind(const char *readcmd) {
     }
 
     while (fgets(buffer, sizeof(buffer), fp)) {
-        char *pos = strstr(buffer, "rssi");
-        if (pos) {
-            // Try both formats: "rssi : 85 %" and "rssi: 85 %"
-            if (sscanf(pos, "rssi : %d %%", &rssi_percent) != 1) {
-                sscanf(pos, "rssi: %d %%", &rssi_percent);
-            }
+        // Use driver-specific format parser (no more guessing!)
+        rssi_percent = rssi_format_parser(buffer);
+        if (rssi_percent > 0) {
 #ifdef DEBUG
             GLOBAL_DEBUG_BUILD(true, "DEBUG: Found RSSI via file rewind: %d%% ", rssi_percent);
 #endif
             return rssi_percent;
-        }
-        
-        // Also check for signal format
-        pos = strstr(buffer, "signal");
-        if (pos) {
-            int signal_dbm;
-            if (sscanf(pos, "signal : %d dBm", &signal_dbm) == 1 ||
-                sscanf(pos, "signal: %d dBm", &signal_dbm) == 1 ||
-                sscanf(pos, "signal=%d", &signal_dbm) == 1) {
-                // Convert dBm to percentage
-                rssi_percent = (signal_dbm + 90) * 100 / 60;
-                if (rssi_percent > 100) rssi_percent = 100;
-                if (rssi_percent < 0) rssi_percent = 0;
-#ifdef DEBUG
-                GLOBAL_DEBUG_BUILD(true, "DEBUG: Found signal via file rewind: %d dBm -> %d%% ", signal_dbm, rssi_percent);
-#endif
-                return rssi_percent;
-            }
         }
     }
 
@@ -2271,20 +2393,29 @@ int get_rssi_mmap(const char *readcmd) {
         int fd = open(path, O_RDONLY);
         if (fd < 0) {
             perror("open");
-            return rssi_percent;
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to open sta_tp_info file: %s ", path);
+#endif
+            return -1;  // Return error code instead of 0 RSSI
         }
         
         struct stat st;
         if (fstat(fd, &st) < 0) {
             perror("fstat");
             close(fd);
-            return rssi_percent;
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to stat sta_tp_info file: %s ", path);
+#endif
+            return -1;  // Return error code instead of 0 RSSI
         }
         
         mapped_size = st.st_size;
         if (mapped_size == 0) {
             close(fd);
-            return rssi_percent;
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: sta_tp_info file is empty: %s ", path);
+#endif
+            return -1;  // Return error code instead of 0 RSSI
         }
         
         mapped_data = mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -2293,7 +2424,10 @@ int get_rssi_mmap(const char *readcmd) {
         if (mapped_data == MAP_FAILED) {
             perror("mmap");
             mapped_data = NULL;
-            return rssi_percent;
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to mmap sta_tp_info file: %s ", path);
+#endif
+            return -1;  // Return error code instead of 0 RSSI
         }
         
         strcpy(last_path, path);
@@ -2303,52 +2437,25 @@ int get_rssi_mmap(const char *readcmd) {
         return rssi_percent;
     }
     
-    // Search for RSSI in mapped memory
-    char *pos = strstr(mapped_data, "rssi");
-    if (pos) {
-        // Try both formats: "rssi : 85 %" and "rssi: 85 %"
-        if (sscanf(pos, "rssi : %d %%", &rssi_percent) != 1) {
-            sscanf(pos, "rssi: %d %%", &rssi_percent);
-        }
+    // Use driver-specific format parser (no more guessing!)
+    rssi_percent = rssi_format_parser(mapped_data);
+    if (rssi_percent > 0) {
 #ifdef DEBUG
         GLOBAL_DEBUG_BUILD(true, "DEBUG: Found RSSI in file: %d%% ", rssi_percent);
 #endif
     } else {
-        // Try alternative formats from sta_tp_info
-        // Some drivers might use "signal" instead of "rssi"
-        pos = strstr(mapped_data, "signal");
-        if (pos) {
-            int signal_dbm;
-            if (sscanf(pos, "signal : %d dBm", &signal_dbm) == 1 ||
-                sscanf(pos, "signal: %d dBm", &signal_dbm) == 1 ||
-                sscanf(pos, "signal=%d", &signal_dbm) == 1) {
-                // Convert dBm to percentage (rough approximation)
-                // -30 dBm = 100%, -90 dBm = 0%
-                rssi_percent = (signal_dbm + 90) * 100 / 60;
-                if (rssi_percent > 100) rssi_percent = 100;
-                if (rssi_percent < 0) rssi_percent = 0;
 #ifdef DEBUG
-                GLOBAL_DEBUG_BUILD(true, "DEBUG: Found signal in dBm: %d dBm -> %d%% ", signal_dbm, rssi_percent);
+        GLOBAL_DEBUG_BUILD(true, "DEBUG: No RSSI found in sta_tp_info ");
+        GLOBAL_DEBUG_BUILD(true, "DEBUG: File content (first 200 chars): %.200s ", mapped_data);
 #endif
-            }
-        } else {
-#ifdef DEBUG
-            GLOBAL_DEBUG_BUILD(true, "DEBUG: No RSSI or signal found in sta_tp_info ");
-            GLOBAL_DEBUG_BUILD(true, "DEBUG: File content (first 200 chars): %.200s ", mapped_data);
-#endif
-        }
     }
     
     return rssi_percent;
 }
 
-// Wrapper function that chooses between mmap and file rewind based on config
+// Optimized wrapper function using function pointer (no runtime conditionals)
 int get_rssi(const char *readcmd) {
-    if (use_file_rewind_method) {
-        return get_rssi_file_rewind(readcmd);
-    } else {
-        return get_rssi_mmap(readcmd);
-    }
+    return rssi_read_function(readcmd);
 }
 
 
@@ -2360,12 +2467,15 @@ void mspLQ(int rssi_osd) {
              "echo \"VLQ %d &B &F60 &L30\" > /tmp/MSPOSD.msg",
               rssi_osd);
               //RSSI PATTERN *** ** * 
+#ifdef DEBUG
     int result = execute_command(command);
     if (result != 0) {
-#ifdef DEBUG
         printf("Warning: MSP OSD command failed with status %d\n", result);
-#endif
     }
+#else
+    execute_command(command);
+#endif
+  
 }
 
 
@@ -2509,15 +2619,14 @@ int main(int argc, char *argv[]) {
     printf("Emergency cooldown: %lums (%.1f frames at %d FPS)\n", 
            emergency_cooldown_ms, (float)emergency_cooldown_ms * target_fps / 1000.0, target_fps);
     
-    // Print control algorithm configuration
-    if (control_algorithm == CONTROL_ALGORITHM_PID) {
-        printf("Control algorithm: PID Controller (smooth transitions)\n");
-    } else {
-        printf("Control algorithm: Simple FIFO (fast, direct)\n");
-    }
+    // Control algorithm configuration printed by init_control_algorithm()
     
-    // Print memory mapping optimization status
-    printf("Memory-mapped file optimization: ENABLED\n");
+    // Print RSSI reading method optimization status
+    if (use_file_rewind_method) {
+        printf("RSSI reading optimization: File rewind with persistent handle\n");
+    } else {
+        printf("RSSI reading optimization: Memory mapping (mmap)\n");
+    }
     
     // Set real-time priority for ultra-high performance racing VTX
     set_realtime_priority();
@@ -2552,6 +2661,12 @@ int main(int argc, char *argv[]) {
     
     // Initialize pre-calculated sleep values for performance
     init_sleep_values();
+    
+    // Initialize RSSI reading method function pointer for performance
+    init_rssi_read_method();
+    
+    // Initialize control algorithm function pointer for performance
+    init_control_algorithm();
     
     // Print sleep configuration
     printf("Sleep configuration:\n");
@@ -2693,7 +2808,7 @@ int main(int argc, char *argv[]) {
             // If that fails or returns invalid value, try sta_tp_info
             if (dbm == -100 || dbm == 0) {
                 int alt_dbm = get_dbm_from_sta_tp_info(driverpath);
-                if (alt_dbm != -100) {
+                if (alt_dbm != -100 && alt_dbm != -1) {  // Check for error return
                     dbm = alt_dbm;
 #ifdef DEBUG
                     GLOBAL_DEBUG_BUILD(true, "DEBUG: Using dBm from sta_tp_info: %d ", dbm);
@@ -2703,6 +2818,14 @@ int main(int argc, char *argv[]) {
             
             aDb = dbm; 
             rssi = get_rssi(driverpath);
+            
+            // Check for RSSI read error
+            if (rssi == -1) {
+#ifdef DEBUG
+                GLOBAL_DEBUG_BUILD(true, "DEBUG: RSSI read failed, using last known value: %d ", rssi);
+#endif
+                rssi = 0;  // Use 0 as fallback for error condition
+            }
             
             // Apply active filter chains to smooth the signals
             // No more if statement - active filter chains are switched by toggle_racemode()
@@ -2800,27 +2923,19 @@ int main(int argc, char *argv[]) {
                 // Calculate target bitrate using VLQ
                 int target_bitrate = (int)(bitrate_max * vlq / PERCENTAGE_CONVERSION);
                 
-                if (control_algorithm == CONTROL_ALGORITHM_PID) {
-                    // PID Controller: Smooth transitions with PID control
-                    int pid_adjustment = pid_calculate(&bitrate_pid, target_bitrate, last_bitrate);
-                    bitrate = last_bitrate + pid_adjustment;
-                    
+                // Use function pointer for control algorithm (no runtime conditionals)
+                bitrate = control_algorithm_function(target_bitrate, last_bitrate, &bitrate_pid);
+                
 #ifdef DEBUG
-                    if (new_signal_data) {
-                        GLOBAL_DEBUG_BUILD(true, "PID: T=%d C=%d Adj=%d F=%d ", 
-                                   target_bitrate, last_bitrate, pid_adjustment, bitrate);
-                    }
-#endif
-                } else {
-                    // Simple FIFO: Direct assignment (faster, more responsive)
-                    bitrate = target_bitrate;
-                    
-#ifdef DEBUG
-                    if (new_signal_data) {
+                if (new_signal_data) {
+                    if (control_algorithm == CONTROL_ALGORITHM_PID) {
+                        GLOBAL_DEBUG_BUILD(true, "PID: T=%d C=%d F=%d ", 
+                                   target_bitrate, last_bitrate, bitrate);
+                    } else {
                         GLOBAL_DEBUG_BUILD(true, "FIFO: T=%d F=%d ", target_bitrate, bitrate);
                     }
-#endif
                 }
+#endif
                 
                 // Clamp bitrate to valid range
                 if (bitrate < bitrate_min) bitrate = bitrate_min;
