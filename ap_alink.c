@@ -17,6 +17,113 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+// Forward declarations for functions used early in the file
+void setup_driver_power_management(void);
+
+// Forward declarations for WiFi card specific functions
+void pit_mode_enable_8812au(void);
+void pit_mode_disable_8812au(void);
+void pit_mode_enable_8812eu2(void);
+void pit_mode_disable_8812eu2(void);
+void pit_mode_enable_873xbu(void);
+void pit_mode_disable_873xbu(void);
+int parse_rssi_8812au_format(const char *buffer);
+int parse_dbm_8812au_format(const char *buffer);
+int parse_rssi_8812eu_format(const char *buffer);
+int parse_dbm_8812eu_format(const char *buffer);
+int parse_rssi_873xbu_format(const char *buffer);
+int parse_dbm_873xbu_format(const char *buffer);
+int execute_command(const char *command);
+
+// Function pointer for RSSI format parser (set once during init)
+static int (*rssi_format_parser)(const char *) = NULL;
+
+// Function pointer for dBm format parser (set once during init)
+static int (*dbm_format_parser)(const char *) = NULL;
+
+// WiFi card configuration lookup table
+typedef struct {
+    const char* name;
+    const char* driver_path;
+    int hardware_mcs_offset;
+    void (*pit_mode_enable_func)(void);
+    void (*pit_mode_disable_func)(void);
+    int (*rssi_format_parser)(const char* buffer);
+    int (*dbm_format_parser)(const char* buffer);
+    const char* power_save_command;
+    const char* max_tx_power_command;
+    const char* pit_tx_power_command;
+    const char* driver_reload_command;
+    const char* power_save_description;
+    const char* mcs_hardware_description;
+    const char* modprobe_config_message;
+} wifi_card_config_t;
+
+// WiFi card configurations lookup table
+static const wifi_card_config_t wifi_card_configs[] = {
+    {
+        .name = "8812eu2",
+        .driver_path = "/proc/net/rtl88x2eu/wlan0",
+        .hardware_mcs_offset = 2,
+        .pit_mode_enable_func = pit_mode_enable_8812eu2,
+        .pit_mode_disable_func = pit_mode_disable_8812eu2,
+        .rssi_format_parser = parse_rssi_8812eu_format,
+        .dbm_format_parser = parse_dbm_8812eu_format,
+        .power_save_command = "iw wlan0 set power_save off",
+        .max_tx_power_command = "iw wlan0 set txpower fixed 30",
+        .pit_tx_power_command = "iw wlan0 set txpower fixed 10",
+        .driver_reload_command = "modprobe -r 8812eu2 && modprobe 8812eu2 rtw_power_mgnt=0 rtw_en_autosleep=0",
+        .power_save_description = "RTL8812EU (8812eu2 driver)",
+        .mcs_hardware_description = "RTL8812EU - Conservative thresholds (+2 dBm, maximum stability)",
+        .modprobe_config_message = "options 8812eu2 rtw_power_mgnt=0 rtw_en_autosleep=0"
+    },
+    {
+        .name = "8812au",
+        .driver_path = "/proc/net/rtl88xxau/wlan0",
+        .hardware_mcs_offset = 0,
+        .pit_mode_enable_func = pit_mode_enable_8812au,
+        .pit_mode_disable_func = pit_mode_disable_8812au,
+        .rssi_format_parser = parse_rssi_8812au_format,
+        .dbm_format_parser = parse_dbm_8812au_format,
+        .power_save_command = "iw wlan0 set power_save off",
+        .max_tx_power_command = "iw wlan0 set txpower fixed 30",
+        .pit_tx_power_command = "iw wlan0 set txpower fixed 10",
+        .driver_reload_command = "modprobe -r 8812au && modprobe 8812au rtw_power_mgnt=0 rtw_en_autosleep=0",
+        .power_save_description = "RTL8812AU (8812au driver)",
+        .mcs_hardware_description = "RTL8812AU - Aggressive thresholds (maximum performance)",
+        .modprobe_config_message = "options 8812au rtw_power_mgnt=0 rtw_en_autosleep=0"
+    },
+    {
+        .name = "873xbu",
+        .driver_path = "/proc/net/rtl873xbu/wlan0",
+        .hardware_mcs_offset = 1,
+        .pit_mode_enable_func = pit_mode_enable_873xbu,
+        .pit_mode_disable_func = pit_mode_disable_873xbu,
+        .rssi_format_parser = parse_rssi_873xbu_format,
+        .dbm_format_parser = parse_dbm_873xbu_format,
+        .power_save_command = "iw wlan0 set power_save off",
+        .max_tx_power_command = "iw wlan0 set txpower fixed 20",
+        .pit_tx_power_command = "iw wlan0 set txpower fixed 5",
+        .driver_reload_command = "modprobe -r 873xbu && modprobe 873xbu rtw_power_mgnt=0 rtw_en_autosleep=0",
+        .power_save_description = "RTL873xBU (873xbu driver)",
+        .mcs_hardware_description = "RTL873xBU - Balanced thresholds (+1 dBm, optimal balance)",
+        .modprobe_config_message = "options 873xbu rtw_power_mgnt=0 rtw_en_autosleep=0"
+    }
+};
+
+// Pre-calculated constants for lookup table sizes (never change at runtime)
+static const int WIFI_CARD_CONFIGS_TABLE_SIZE = sizeof(wifi_card_configs) / sizeof(wifi_card_configs[0]);
+
+// Helper function to find WiFi card configuration
+static const wifi_card_config_t* get_wifi_card_config(const char* card_name) {
+    for (int i = 0; i < WIFI_CARD_CONFIGS_TABLE_SIZE; i++) {
+        if (strcmp(wifi_card_configs[i].name, card_name) == 0) {
+            return &wifi_card_configs[i];
+        }
+    }
+    return NULL;
+}
+
 // =============================================================================
 // GLOBAL CONFIGURATION VALUES (Runtime Configurable)
 // =============================================================================
@@ -58,9 +165,6 @@ static int DEFAULT_DBM_MAX = -50;
 static int DEFAULT_HYSTERESIS = 1;
 static int DEFAULT_MINUS_HYSTERESIS = -1;
 static int DEFAULT_INITIAL_DBM = -100;
-static int DEFAULT_TARGET_FPS = 120;
-
-// Removed DEFAULT_PID_* constants - using static pid_* variables instead
 
 // Signal Thresholds (Runtime Configurable - High Frequency Access)
 static int HIGH_RSSI_THRESHOLD = 55;
@@ -70,17 +174,34 @@ static int VLQ_MAX_THRESHOLD = 100;
 static int VLQ_MIN_THRESHOLD = 1;
 static int PERCENTAGE_CONVERSION = 100;
 
+// Precomputed constants for hot path optimization
+static double bitrate_scale = 0.0;           // Precomputed: bitrate_max / PERCENTAGE_CONVERSION
+static long signal_sampling_interval_ns = 0; // Precomputed: NS_PER_SEC / signal_sampling_freq_hz
+static const long NS_PER_SEC = 1000000000L;   // Nanoseconds per second constant
+
+// Counter-based sampling optimization variables
+static unsigned long sample_counter = 0;      // Simple counter for signal sampling
+static bool new_signal_data_available = false; // Flag for new signal data
+
+// Precomputed derived values for configuration display
+static float signal_sampling_freq_hz_display = 0.0f;  // Precomputed: fps / signal_sampling_interval
+static float emergency_cooldown_frames_display = 0.0f; // Precomputed: emergency_cooldown_ms * fps / 1000.0
+
+// Precomputed VLQ calculation constants for all possible dbm_Min values
+static double dbm_range_inv_high = 0.0;      // For DBM_THRESHOLD_HIGH
+static double dbm_range_inv_medium = 0.0;    // For DBM_THRESHOLD_MEDIUM  
+static double dbm_range_inv_low = 0.0;       // For DBM_THRESHOLD_LOW
+static double dbm_range_inv_fallback = 0.0;  // For DEFAULT_DBM_MAX - MIN_DBM_DIFFERENCE
+
 // dBm Threshold Values (Runtime Configurable - High Frequency Access)
 static int DBM_THRESHOLD_HIGH = -70;
 static int DBM_THRESHOLD_MEDIUM = -55;
 static int DBM_THRESHOLD_LOW = -53;
 static int MIN_DBM_DIFFERENCE = 1;
 
-// Removed MCS_RSSI_THRESHOLDS - using dynamic thresholds instead
-
-// Bitrate to MCS mapping thresholds (Mbps)
-static const int BITRATE_MCS_THRESHOLDS[] = {
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10  // Mbps thresholds for MCS 0-9
+// Bitrate to MCS mapping thresholds (Mbps) - Actual MCS data rates for 20MHz
+static const double BITRATE_MCS_THRESHOLDS[] = {
+    6.5, 13, 19.5, 26, 39, 52, 58.5, 65, 78, 86.7  // Mbps thresholds for MCS 0-9
 };
 
 // Configuration Variables (loaded from .conf file)
@@ -114,16 +235,22 @@ static int disable_wifi_power_save = 1;  // Default: disable power saving for FP
 static int enable_maximum_tx_power = 1;  // Default: enable maximum TX power for FPV range
 static int pit_mode_enabled = 0;         // PIT mode: low power standby with HTTP wake-up
 static int hardware_mcs_offset = 0;      // Hardware-specific MCS threshold offset (set during init)
-static int hardware_mcs_low_cmd = 0x10;  // Hardware-specific MCS low command (set during init)
-static int hardware_mcs_medium_cmd = 0x10; // Hardware-specific MCS medium command (set during init)
-static int hardware_mcs_high_cmd = 0x10; // Hardware-specific MCS high command (set during init)
 static char racing_video_resolution[32] = "1280x720";
 static int racing_exposure = 11;
 static int racing_fps = 120;
 static int auto_exposure_enabled = 1;  // Enable automatic exposure calculation
 static char racing_rssi_filter_chain_config[64] = "1";
+
+// Performance optimization lookup tables
+static int exposure_lookup_table[301];  // FPS 1-300 -> exposure values
+static int mcs_command_lookup_table[16]; // MCS 0-15 -> command values
+static int rssi_threshold_lookup_table[10]; // MCS 0-9 -> RSSI thresholds
+static int bitrate_to_mcs_lookup_table[1001]; // Bitrate 0-1000 Mbps -> MCS values
 static char racing_dbm_filter_chain_config[64] = "1";
-static int wifi_performance_mode = 0;
+static int loop_timing_mode = 0;  // 0=normal, 1=high_perf, 2=ultra_low_latency
+
+// Driver path - determined once at startup based on WiFi card type
+static char driverpath[256] = {0};
 
 // =============================================================================
 // WIFI CARD INITIALIZATION
@@ -156,25 +283,25 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     printf("Initializing WiFi card: %s\n", wificard_type);
     
     // =============================================================================
-    // 1. DRIVER PATH DETECTION
+    // 1. DRIVER PATH DETECTION USING LOOKUP TABLE
     // =============================================================================
-    if (strcmp(wificard_type, "8812eu2") == 0) {
-        strcpy(driverpath, "/proc/net/rtl88x2eu/wlan0");
-        printf("Driver path: %s\n", driverpath);
-    }
-    else if (strcmp(wificard_type, "8812au") == 0) {
-        strcpy(driverpath, "/proc/net/rtl88xxau/wlan0");
-        printf("Driver path: %s\n", driverpath);
-    }
-    else if (strcmp(wificard_type, "873xbu") == 0) {
-        strcpy(driverpath, "/proc/net/rtl873xbu/wlan0");
-        printf("Driver path: %s\n", driverpath);
-    }
-    else {
+    const wifi_card_config_t* config = get_wifi_card_config(wificard_type);
+    if (!config) {
         printf("ERROR: Unknown WiFi card: %s\n", wificard_type);
-        printf("Available options: 8812eu2, 8812au, 873xbu\n");
+        printf("Available options: ");
+        for (int i = 0; i < WIFI_CARD_CONFIGS_TABLE_SIZE; i++) {
+            printf("%s", wifi_card_configs[i].name);
+            if (i < WIFI_CARD_CONFIGS_TABLE_SIZE - 1) {
+                printf(", ");
+            }
+        }
+        printf("\n");
         return 0;
     }
+    
+    // Set driver path from lookup table
+    strcpy(driverpath, config->driver_path);
+    printf("Driver path: %s\n", driverpath);
     
     // =============================================================================
     // 2. DRIVER PATH VALIDATION (Only if RSSI reading is enabled)
@@ -195,44 +322,53 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     }
     
     // =============================================================================
-    // 3. HARDWARE-SPECIFIC MCS CONFIGURATION
+    // 3. HARDWARE-SPECIFIC MCS CONFIGURATION USING LOOKUP TABLE
     // =============================================================================
-    if (strcmp(wificard_type, "8812au") == 0) {
-        hardware_mcs_offset = 0;  // Most aggressive - maximum performance
-        hardware_mcs_low_cmd = 0x0c;    // Low MCS command
-        hardware_mcs_medium_cmd = 0x10; // Medium MCS command
-        hardware_mcs_high_cmd = 0xFF;   // High MCS command
-        printf("Hardware MCS: RTL8812AU - Aggressive thresholds (maximum performance)\n");
-    } else if (strcmp(wificard_type, "8812eu2") == 0) {
-        hardware_mcs_offset = 2;  // Most conservative - maximum stability
-        hardware_mcs_low_cmd = 0x08;    // Conservative low MCS command
-        hardware_mcs_medium_cmd = 0x0c; // Conservative medium MCS command
-        hardware_mcs_high_cmd = 0x10;   // Conservative high MCS command
-        printf("Hardware MCS: RTL8812EU - Conservative thresholds (+2 dBm, maximum stability)\n");
-    } else if (strcmp(wificard_type, "873xbu") == 0) {
-        hardware_mcs_offset = 1;  // Balanced - optimal performance/stability
-        hardware_mcs_low_cmd = 0x0a;    // Balanced low MCS command
-        hardware_mcs_medium_cmd = 0x0e; // Balanced medium MCS command
-        hardware_mcs_high_cmd = 0x20;   // Balanced high MCS command
-        printf("Hardware MCS: RTL873xBU - Balanced thresholds (+1 dBm, optimal balance)\n");
-    } else {
-        hardware_mcs_offset = 0;  // Default fallback
-        hardware_mcs_low_cmd = 0x10;    // Default commands
-        hardware_mcs_medium_cmd = 0x10;
-        hardware_mcs_high_cmd = 0x10;
-        printf("Hardware MCS: Unknown - Using default thresholds\n");
-    }
+    hardware_mcs_offset = config->hardware_mcs_offset;
+    
+    // Print hardware-specific MCS configuration using lookup table
+    printf("Hardware MCS: %s\n", config->mcs_hardware_description);
+    
+    // Set format parsers from lookup table
+    rssi_format_parser = config->rssi_format_parser;
+    dbm_format_parser = config->dbm_format_parser;
     
     // =============================================================================
     // 4. POWER MANAGEMENT CONFIGURATION
     // =============================================================================
     printf("Configuring WiFi power management...\n");
     
+    // Print WiFi power management configuration
+    printf("WiFi power saving: %s\n", disable_wifi_power_save ? "DISABLED (recommended for FPV)" : "ENABLED (not recommended for FPV)");
+    
     // Disable WiFi power saving for FPV stability
     disable_autopower();
     
     // Set maximum transmission power for maximum FPV range
     set_maximum_tx_power();
+    
+    // Setup driver-level power management (additional protection)
+    setup_driver_power_management();
+    
+    // =============================================================================
+    // 5. NETWORK BUFFER OPTIMIZATION (General WiFi Performance)
+    // =============================================================================
+    printf("Optimizing network buffers for WiFi performance...\n");
+    int result1 = execute_command("sysctl -w net.core.rmem_default=16384");
+    int result2 = execute_command("sysctl -w net.core.rmem_max=65536");
+    int result3 = execute_command("sysctl -w net.core.wmem_default=16384");
+    int result4 = execute_command("sysctl -w net.core.wmem_max=65536");
+    int result5 = execute_command("ifconfig wlan0 txqueuelen 100");
+    int result6 = execute_command("sysctl -w net.core.netdev_max_backlog=64");
+    
+    // Check if any network configuration commands failed
+    if (result1 != 0 || result2 != 0 || result3 != 0 || result4 != 0 || result5 != 0 || result6 != 0) {
+#ifdef DEBUG
+        printf("Warning: Some network buffer configuration commands failed\n");
+#endif
+    } else {
+        printf("Network buffers optimized for WiFi performance\n");
+    }
     
     printf("WiFi card initialization complete\n");
     return 1;
@@ -254,6 +390,12 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
  * @return Calculated exposure time in milliseconds
  */
 static int calculate_exposure_from_fps(int fps) {
+    // Use lookup table for performance
+    if (fps >= 0 && fps <= 300) {
+        return exposure_lookup_table[fps];
+    }
+    
+    // Fallback for out-of-range values
     if (fps <= 0) {
         return 8; // Default fallback
     }
@@ -349,6 +491,19 @@ typedef enum {
     FILTER_TYPE_MEAN = 5,
     FILTER_TYPE_GAUSSIAN = 6
 } filter_type_t;
+
+// Function pointer types for filter operations
+typedef float (*filter_process_func_t)(float sample, void* filter_data, bool is_rssi);
+typedef void (*filter_init_func_t)(void* filter_data, bool is_rssi);
+typedef void (*filter_reset_func_t)(void* filter_data, bool is_rssi);
+
+// Filter operation lookup table entry
+typedef struct {
+    filter_process_func_t process_func;
+    filter_init_func_t init_func;
+    filter_reset_func_t reset_func;
+    const char* name;
+} filter_lookup_entry_t;
 
 // ArduPilot-style Low-Pass Filter Structure
 typedef struct {
@@ -478,13 +633,16 @@ void init_filter_chain_filters(filter_chain_t *chain, float process_var, float m
                                float lpf_cutoff_freq, float lpf_sample_freq, bool is_rssi);
 void init_debug_output(void);
 void init_cooldown_check(void);
+void init_worker_thread(void);
+void *worker_thread_func(void *arg);
+void init_counter_sampling(void);
+bool should_sample_signal_counter(void);
 bool should_change_bitrate(int new_bitrate, int current_bitrate, unsigned long strict_cooldown_ms, 
                           unsigned long up_cooldown_ms, int min_change_percent, unsigned long emergency_cooldown_ms);
 void toggle_racemode(void);
 int toggle_racemode_http(void);
 void disable_autopower(void);
 void set_maximum_tx_power(void);
-void setup_driver_power_management(void);
 void enable_pit_mode(void);
 void disable_pit_mode(void);
 void toggle_pit_mode(void);
@@ -498,7 +656,7 @@ int bitrate_to_mcs(int bitrate_mbps);
 // Sleep function prototypes
 void simple_sleep(bool is_error_condition, bool has_work_done);
 void smart_sleep(bool is_error_condition, bool has_work_done);
-void unified_sleep(bool is_error_condition, bool has_work_done);
+void main_loop_sleep(bool is_error_condition, bool has_work_done);
 void init_sleep_values();
 void enable_global_debug();
 
@@ -508,19 +666,51 @@ int get_rssi_mmap(const char *readcmd);
 int get_rssi(const char *readcmd);
 void init_rssi_read_method();
 
+// dBm reading function prototypes
+int get_dbm_file_rewind(const char *readcmd);
+int get_dbm_mmap(const char *readcmd);
+int get_dbm(const char *readcmd);
+void init_dbm_read_method();
+
 // Control algorithm function prototypes
 void init_control_algorithm();
 int pid_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid);
 int fifo_control_algorithm(int target_bitrate, int last_bitrate, pid_controller_t *pid);
+void pid_init(pid_controller_t *pid, float kp, float ki, float kd);
+void pid_reset(pid_controller_t *pid);
 
 // PIT mode function prototypes
 void init_pit_mode();
+void init_race_mode();
+void init_http_system();
 void pit_mode_enable_8812au(void);
 void pit_mode_disable_8812au(void);
 void pit_mode_enable_8812eu2(void);
 void pit_mode_disable_8812eu2(void);
 void pit_mode_enable_873xbu(void);
 void pit_mode_disable_873xbu(void);
+
+
+// Function prototypes for functions used by FEC
+int execute_command(const char *command);
+
+// Lookup table initialization functions
+void build_exposure_lookup_table(void);
+void build_mcs_command_lookup_table(void);
+void build_rssi_threshold_lookup_table(void);
+void build_bitrate_to_mcs_lookup_table(void);
+void init_performance_lookup_tables(void);
+
+// Pure function prototypes
+int bitrate_to_mcs_pure(int bitrate_mbps, const double* thresholds);
+int get_dynamic_rssi_threshold_pure(int current_mcs, 
+                                   const int* mcs_thresholds,
+                                   int hardware_rssi_offset,
+                                   int hardware_mcs_offset);
+double calculate_vlq_pure(int filtered_dbm, int dbm_min, int dbm_max, int filtered_rssi);
+int calculate_target_bitrate_pure(double vlq, int bitrate_max);
+int calculate_exposure_pure(int fps);
+int get_mcs_command_pure(int mcs_index, const char* wificard_type);
 
 // RSSI format parser prototypes
 int parse_rssi_8812eu_format(const char *buffer);
@@ -574,20 +764,115 @@ void enable_global_debug() {
     printf("Global debug system enabled\n");
 }
 
+// =============================================================================
+// PERFORMANCE OPTIMIZATION LOOKUP TABLES
+// =============================================================================
+
+// Build exposure lookup table for FPS 1-300
+void build_exposure_lookup_table(void) {
+    printf("Building exposure lookup table for FPS 1-300\n");
+    
+    for (int fps = 0; fps <= 300; fps++) {
+        if (fps <= 0) {
+            exposure_lookup_table[fps] = 8; // Default fallback
+        } else {
+            // Calculate frame period in milliseconds
+            float frame_period_ms = 1000.0f / fps;
+            
+            // Apply 180° shutter rule: exposure = frame_period / 2
+            float exposure_ms = frame_period_ms / 2.0f;
+            
+            // Round to nearest integer and ensure minimum of 1ms
+            int exposure = (int)(exposure_ms + 0.5f);
+            if (exposure < 1) exposure = 1;
+            
+            exposure_lookup_table[fps] = exposure;
+        }
+    }
+    
+    printf("Exposure lookup table built (FPS 0-300)\n");
+}
+
+// Build MCS command lookup table for MCS 0-15
+void build_mcs_command_lookup_table(void) {
+    printf("Building MCS command lookup table for MCS 0-15\n");
+    
+    for (int mcs = 0; mcs < 16; mcs++) {
+        // Realtek MCS encoding: MCS 0-15 = 0x80 + mcs_index
+        mcs_command_lookup_table[mcs] = 0x80 + mcs;
+    }
+    
+    printf("MCS command lookup table built (MCS 0-15)\n");
+}
+
+// Build RSSI threshold lookup table for MCS 0-9
+void build_rssi_threshold_lookup_table(void) {
+    printf("Building RSSI threshold lookup table for MCS 0-9\n");
+    
+    // MCS-specific RSSI thresholds (lower MCS = more sensitive threshold)
+    int mcs_thresholds[10] = {-95, -90, -85, -80, -75, -70, -65, -60, -55, -50};
+    
+    for (int mcs = 0; mcs < 10; mcs++) {
+        int base_threshold = mcs_thresholds[mcs];
+        
+        // Apply hardware-specific offset
+        int dynamic_threshold = base_threshold + hardware_rssi_offset;
+        
+        // Apply hardware-specific MCS offset (set during initialization)
+        dynamic_threshold += hardware_mcs_offset;
+        
+        // Add safety margin for emergency drop
+        dynamic_threshold += SAFETY_MARGIN_DBM;
+        
+        rssi_threshold_lookup_table[mcs] = dynamic_threshold;
+    }
+    
+    printf("RSSI threshold lookup table built (MCS 0-9)\n");
+}
+
+// Build bitrate to MCS lookup table for 0-1000 Mbps
+void build_bitrate_to_mcs_lookup_table(void) {
+    printf("Building bitrate to MCS lookup table for 0-1000 Mbps\n");
+    
+    for (int bitrate = 0; bitrate <= 1000; bitrate++) {
+        int mcs = 0;
+        for (int i = 0; i < 10; i++) {
+            if (bitrate <= BITRATE_MCS_THRESHOLDS[i]) {
+                mcs = i;
+                break;
+            }
+        }
+        if (bitrate > BITRATE_MCS_THRESHOLDS[9]) {
+            mcs = 9; // MCS 9 (highest)
+        }
+        bitrate_to_mcs_lookup_table[bitrate] = mcs;
+    }
+    
+    printf("Bitrate to MCS lookup table built (0-1000 Mbps)\n");
+}
+
+// Initialize all performance lookup tables
+void init_performance_lookup_tables(void) {
+    printf("Initializing performance optimization lookup tables\n");
+    
+    build_exposure_lookup_table();
+    build_mcs_command_lookup_table();
+    build_rssi_threshold_lookup_table();
+    build_bitrate_to_mcs_lookup_table();
+    
+    printf("All performance lookup tables initialized\n");
+}
+
+
 // Pre-calculated sleep value for performance (set during init)
 static unsigned int sleep_value_us = 0; // Sleep value in microseconds
 
 // Function pointer for sleep function (set once during init)
 static void (*sleep_function)(bool, bool) = NULL;
 
-// Function pointer for RSSI reading method (set once during init)
+// Function pointers for RSSI and dBm reading methods (set once during init)
 static int (*rssi_read_function)(const char *) = NULL;
-
-// Function pointer for RSSI format parser (set once during init)
-static int (*rssi_format_parser)(const char *) = NULL;
-
-// Function pointer for dBm format parser (set once during init)
-static int (*dbm_format_parser)(const char *) = NULL;
+static int (*dbm_read_function)(const char *) = NULL;
 
 // Function pointer for control algorithm (set once during init)
 static int (*control_algorithm_function)(int, int, pid_controller_t*) = NULL;
@@ -619,35 +904,83 @@ void init_debug_output() {
     }
 }
 
+// Asymmetric Cooldown Timing Variables (must be declared before cooldown functions)
+static unsigned long last_change_time = 0;
+static unsigned long last_up_time = 0;
+static int last_bitrate = 0;
+
 // Cooldown check functions (optimized - no runtime conditionals)
-static bool cooldown_check_disabled(int bitrate, int last_bitrate, unsigned long strict_cooldown_ms, 
+// These functions now handle ALL bitrate change logic including timing updates
+static bool cooldown_check_disabled(int bitrate, int current_bitrate, unsigned long strict_cooldown_ms, 
                                    unsigned long up_cooldown_ms, int min_change_percent, unsigned long emergency_cooldown_ms) {
     (void)strict_cooldown_ms; (void)up_cooldown_ms; (void)min_change_percent; (void)emergency_cooldown_ms;
-    return true; // Always allow bitrate changes when cooldown is disabled
+    
+    // Always allow bitrate changes when cooldown is disabled
+    // Update timing variables
+    unsigned long now = get_current_time_ms();
+    last_change_time = now;
+    if (bitrate > current_bitrate) {
+        last_up_time = now;
+    }
+    last_bitrate = bitrate;
+    
+    return true;
 }
 
-static bool cooldown_check_enabled(int bitrate, int last_bitrate, unsigned long strict_cooldown_ms, 
+static bool cooldown_check_enabled(int bitrate, int current_bitrate, unsigned long strict_cooldown_ms, 
                                   unsigned long up_cooldown_ms, int min_change_percent, unsigned long emergency_cooldown_ms) {
-    return should_change_bitrate(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms);
+    bool should_change = should_change_bitrate(bitrate, current_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms);
+    
+    // If cooldown check passes, update timing variables
+    if (should_change) {
+        unsigned long now = get_current_time_ms();
+        last_change_time = now;
+        if (bitrate > current_bitrate) {
+            last_up_time = now;
+        }
+        last_bitrate = bitrate;
+    }
+    
+    return should_change;
 }
 
 // Initialize cooldown check function pointer (call once at startup)
 void init_cooldown_check() {
     if (cooldown_enabled == 0) {
         cooldown_check_function = cooldown_check_disabled;
+        printf("Cooldown system: DISABLED (immediate bitrate changes)\n");
     } else {
         cooldown_check_function = cooldown_check_enabled;
+        printf("Cooldown system: ENABLED (asymmetric timing)\n");
     }
+}
+
+// Initialize worker thread (call once at startup) - moved after variable declarations
+
+// Counter-based sampling optimization functions
+bool should_sample_signal_counter(void) {
+    // Simple counter instead of expensive time calculations
+    if (++sample_counter >= (1000 / signal_sampling_freq_hz)) {  // 1000Hz main loop / signal freq
+        sample_counter = 0;
+        return true;
+    }
+    return false;
+}
+
+void init_counter_sampling(void) {
+    sample_counter = 0;
+    new_signal_data_available = false;
+    printf("Counter-based sampling: Initialized for signal sampling\n");
 }
 
 // Initialize sleep value and function pointer (call once at startup)
 void init_sleep_values() {
-    // Set sleep value based on wifi_performance_mode (never changes during runtime)
-    if (wifi_performance_mode == 0) {
+    // Set sleep value based on loop_timing_mode (never changes during runtime)
+    if (loop_timing_mode == 0) {
         sleep_value_us = sleep_config.main_loop_us + (sleep_config.normal_mode_ms * 1000);
-    } else if (wifi_performance_mode == 1) {
+    } else if (loop_timing_mode == 1) {
         sleep_value_us = sleep_config.main_loop_us + (sleep_config.high_perf_mode_ms * 1000);
-    } else if (wifi_performance_mode == 2) {
+    } else if (loop_timing_mode == 2) {
         sleep_value_us = sleep_config.main_loop_us + (sleep_config.ultra_low_mode_ms * 1000);
     } else {
         sleep_value_us = sleep_config.main_loop_us + (sleep_config.normal_mode_ms * 1000); // Default
@@ -659,6 +992,13 @@ void init_sleep_values() {
     } else {
         sleep_function = simple_sleep;
     }
+    
+    // Print sleep configuration
+    printf("Sleep configuration:\n");
+    printf("  Mode: %s\n", sleep_config.smart_sleep_enabled ? "Smart (adaptive)" : "Simple (fixed)");
+    printf("  Base loop: %uus\n", sleep_config.main_loop_us);
+    printf("  Sleep value: %uus (%.1fms)\n", sleep_value_us, sleep_value_us / 1000.0);
+    printf("  Error conditions: %ums\n", sleep_config.error_condition_ms);
 }
 
 
@@ -694,8 +1034,8 @@ void smart_sleep(bool is_error_condition, bool has_work_done) {
     usleep(sleep_value_us);
 }
 
-// Unified sleep function - uses pre-calculated function pointer for maximum performance
-void unified_sleep(bool is_error_condition, bool has_work_done) {
+// Main loop sleep function - uses pre-calculated function pointer for maximum performance
+void main_loop_sleep(bool is_error_condition, bool has_work_done) {
     sleep_function(is_error_condition, has_work_done);
 }
 
@@ -742,23 +1082,28 @@ int execute_command(const char *command) {
     return WEXITSTATUS(status);
 }
 
-// Global Kalman filters for different signals
-static kalman_filter_t rssi_filter = {
+// Filter instances table - organized by filter type
+typedef struct {
+    void* rssi_instance;
+    void* dbm_instance;
+} filter_instances_t;
+
+// Global filter instances organized by type
+static kalman_filter_t rssi_kalman_filter = {
     .estimate = 50.0f,           // Initial RSSI estimate (50%) - good starting point
     .error_estimate = 1.0f,      // Initial error estimate - safe default
     .process_variance = 0.0f,    // Default - updated from kalman_rssi_process config
     .measurement_variance = 0.0f // Default - updated from kalman_rssi_measure config
 };
 
-static kalman_filter_t dbm_filter = {
+static kalman_filter_t dbm_kalman_filter = {
     .estimate = -60.0f,          // Initial dBm estimate - typical FPV range
     .error_estimate = 1.0f,      // Initial error estimate - safe default
     .process_variance = 0.0f,    // Default - updated from kalman_dbm_process config
     .measurement_variance = 0.0f // Default - updated from kalman_dbm_measure config
 };
 
-// Global Low-Pass Filter instances
-static lowpass_filter_t rssi_lpf = {
+static lowpass_filter_t rssi_lowpass_filter = {
     .output = 50.0f,             // Initial RSSI estimate - good starting point
     .alpha = DEFAULT_FILTER_ALPHA,              // Default filter coefficient - moderate smoothing
     .initialised = false,        // Not initialized yet - will be set during init
@@ -766,7 +1111,7 @@ static lowpass_filter_t rssi_lpf = {
     .sample_freq = DEFAULT_SAMPLE_FREQ         // Default 10Hz sample rate - updated from config
 };
 
-static lowpass_filter_t dbm_lpf = {
+static lowpass_filter_t dbm_lowpass_filter = {
     .output = -60.0f,            // Initial dBm estimate - typical FPV range
     .alpha = DEFAULT_FILTER_ALPHA,              // Default filter coefficient - moderate smoothing
     .initialised = false,        // Not initialized yet - will be set during init
@@ -774,7 +1119,6 @@ static lowpass_filter_t dbm_lpf = {
     .sample_freq = DEFAULT_SAMPLE_FREQ         // Default 10Hz sample rate - updated from config
 };
 
-// Global Mode Filter instances
 static mode_filter_t rssi_mode_filter = {
     .sample_index = 0,            // Start at first sample position
     .return_element = 0,          // Default - updated from DEFAULT_MODE_FILTER_RETURN_ELEMENT
@@ -789,37 +1133,6 @@ static mode_filter_t dbm_mode_filter = {
     .output = -60.0f              // Initial dBm estimate - typical FPV range
 };
 
-// Global Mean Filter instances
-static mean_filter_t rssi_mean_filter = {
-    .sample_index = 0,            // Start at first sample position
-    .sample_count = 0,           // No samples collected yet
-    .sum = 0.0f,                 // Running sum starts at zero
-    .output = 50.0f              // Initial RSSI estimate - good starting point
-};
-
-static mean_filter_t dbm_mean_filter = {
-    .sample_index = 0,            // Start at first sample position
-    .sample_count = 0,            // No samples collected yet
-    .sum = 0.0f,                  // Running sum starts at zero
-    .output = -60.0f             // Initial dBm estimate - typical FPV range
-};
-
-// Global Gaussian Filter instances
-static gaussian_filter_t rssi_gaussian_filter = {
-    .sample_index = 0,            // Start at first sample position
-    .sample_count = 0,            // No samples collected yet
-    .output = 50.0f,             // Initial RSSI estimate - good starting point
-    .weights_initialized = false  // Weights not calculated yet - will be done on first use
-};
-
-static gaussian_filter_t dbm_gaussian_filter = {
-    .sample_index = 0,            // Start at first sample position
-    .sample_count = 0,            // No samples collected yet
-    .output = -60.0f,            // Initial dBm estimate - typical FPV range
-    .weights_initialized = false  // Weights not calculated yet - will be done on first use
-};
-
-// Global Derivative Filter instances
 static derivative_filter_t rssi_derivative_filter = {
     .sample_index = 0,            // Start at first sample position
     .last_slope = 0.0f,          // No slope calculated yet
@@ -832,7 +1145,6 @@ static derivative_filter_t dbm_derivative_filter = {
     .new_data = false             // No new data available yet
 };
 
-// Global 2-Pole Low-Pass Filter instances
 static lpf_2pole_t rssi_2pole_lpf = {
     .delay_element_1 = 0.0f,      // First delay element - starts at zero
     .delay_element_2 = 0.0f,      // Second delay element - starts at zero
@@ -851,10 +1163,68 @@ static lpf_2pole_t dbm_2pole_lpf = {
     .output = -60.0f              // Initial dBm estimate - typical FPV range
 };
 
-// Asymmetric Cooldown Timing Variables
-static unsigned long last_change_time = 0;
-static unsigned long last_up_time = 0;
-static int last_bitrate = 0;
+static mean_filter_t rssi_mean_filter = {
+    .sample_index = 0,            // Start at first sample position
+    .sample_count = 0,           // No samples collected yet
+    .sum = 0.0f,                 // Running sum starts at zero
+    .output = 50.0f              // Initial RSSI estimate - good starting point
+};
+
+static mean_filter_t dbm_mean_filter = {
+    .sample_index = 0,            // Start at first sample position
+    .sample_count = 0,            // No samples collected yet
+    .sum = 0.0f,                  // Running sum starts at zero
+    .output = -60.0f             // Initial dBm estimate - typical FPV range
+};
+
+static gaussian_filter_t rssi_gaussian_filter = {
+    .sample_index = 0,            // Start at first sample position
+    .sample_count = 0,            // No samples collected yet
+    .output = 50.0f,             // Initial RSSI estimate - good starting point
+    .weights_initialized = false  // Weights not calculated yet - will be done on first use
+};
+
+static gaussian_filter_t dbm_gaussian_filter = {
+    .sample_index = 0,            // Start at first sample position
+    .sample_count = 0,            // No samples collected yet
+    .output = -60.0f,            // Initial dBm estimate - typical FPV range
+    .weights_initialized = false  // Weights not calculated yet - will be done on first use
+};
+
+// Filter instances lookup table
+static const filter_instances_t filter_instances_table[] = {
+    [FILTER_TYPE_KALMAN] = {
+        .rssi_instance = (void*)&rssi_kalman_filter,
+        .dbm_instance = (void*)&dbm_kalman_filter
+    },
+    [FILTER_TYPE_LOWPASS] = {
+        .rssi_instance = (void*)&rssi_lowpass_filter,
+        .dbm_instance = (void*)&dbm_lowpass_filter
+    },
+    [FILTER_TYPE_MODE] = {
+        .rssi_instance = (void*)&rssi_mode_filter,
+        .dbm_instance = (void*)&dbm_mode_filter
+    },
+    [FILTER_TYPE_DERIVATIVE] = {
+        .rssi_instance = (void*)&rssi_derivative_filter,
+        .dbm_instance = (void*)&dbm_derivative_filter
+    },
+    [FILTER_TYPE_2POLE_LPF] = {
+        .rssi_instance = (void*)&rssi_2pole_lpf,
+        .dbm_instance = (void*)&dbm_2pole_lpf
+    },
+    [FILTER_TYPE_MEAN] = {
+        .rssi_instance = (void*)&rssi_mean_filter,
+        .dbm_instance = (void*)&dbm_mean_filter
+    },
+    [FILTER_TYPE_GAUSSIAN] = {
+        .rssi_instance = (void*)&rssi_gaussian_filter,
+        .dbm_instance = (void*)&dbm_gaussian_filter
+    }
+};
+
+// Pre-calculated constant for filter instances table size (never changes at runtime)
+static const int FILTER_INSTANCES_TABLE_SIZE = sizeof(filter_instances_table) / sizeof(filter_instances_table[0]);
 
 // Global variable for RSSI reading method
 int use_file_rewind_method = 0;  // 0 = mmap (default), 1 = file rewind
@@ -862,75 +1232,120 @@ int use_file_rewind_method = 0;  // 0 = mmap (default), 1 = file rewind
 // Global WiFi driver availability flag
 int wifi_driver_available = 1;  // Assume available until proven otherwise
 
-// Initialize RSSI reading method function pointer (call once at startup)
+// Initialize RSSI and dBm reading method function pointers (call once at startup)
 void init_rssi_read_method() {
-    // Set function pointer based on RSSI read method configuration (never changes during runtime)
+    // Set function pointers based on RSSI read method configuration (never changes during runtime)
     if (use_file_rewind_method) {
         rssi_read_function = get_rssi_file_rewind;
+        dbm_read_function = get_dbm_file_rewind;
     } else {
         rssi_read_function = get_rssi_mmap;
+        dbm_read_function = get_dbm_mmap;
     }
     
-    // Set format parser based on WiFi card type (never changes during runtime)
-    if (strcmp(wificard, "8812eu2") == 0) {
-        rssi_format_parser = parse_rssi_8812eu_format;
-        dbm_format_parser = parse_dbm_8812eu_format;
-    } else if (strcmp(wificard, "8812au") == 0) {
-        rssi_format_parser = parse_rssi_8812au_format;
-        dbm_format_parser = parse_dbm_8812au_format;
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        rssi_format_parser = parse_rssi_873xbu_format;
-        dbm_format_parser = parse_dbm_873xbu_format;
+    
+    // Print RSSI reading method optimization status
+    if (use_file_rewind_method) {
+        printf("RSSI/dBm reading optimization: File rewind with persistent handle\n");
     } else {
-        // Default to 8812EU format
-        rssi_format_parser = parse_rssi_8812eu_format;
-        dbm_format_parser = parse_dbm_8812eu_format;
+        printf("RSSI/dBm reading optimization: Memory mapping (mmap)\n");
     }
 }
 
-// Initialize control algorithm function pointer (call once at startup)
-void init_control_algorithm() {
-    // Set function pointer based on control algorithm configuration (never changes during runtime)
-    if (control_algorithm == CONTROL_ALGORITHM_PID) {
-        control_algorithm_function = pid_control_algorithm;
-        printf("Control algorithm: PID Controller (smooth transitions)\n");
-    } else {
-        control_algorithm_function = fifo_control_algorithm;
-        printf("Control algorithm: Simple FIFO (fast, direct)\n");
+
+// Helper function to set PIT mode function pointer using lookup table
+static void set_pit_mode_function(void) {
+    const wifi_card_config_t* config = get_wifi_card_config(wificard);
+    if (!config) {
+        printf("PIT mode: ERROR - Unknown WiFi card type: %s\n", wificard);
+        return;
     }
+    
+    pit_mode_function = pit_mode_enabled ? config->pit_mode_enable_func : config->pit_mode_disable_func;
 }
 
 // Initialize PIT mode function pointer (call once at startup)
 void init_pit_mode() {
-    // Set function pointer based on WiFi card type and PIT mode configuration (never changes during runtime)
-    if (strcmp(wificard, "8812au") == 0) {
+    set_pit_mode_function();
+    
         if (pit_mode_enabled) {
-            pit_mode_function = pit_mode_enable_8812au;
-            printf("PIT mode: RTL8812AU ENABLED (low power standby)\n");
+        printf("PIT mode: %s ENABLED (low power standby)\n", wificard);
         } else {
-            pit_mode_function = pit_mode_disable_8812au;
-            printf("PIT mode: RTL8812AU DISABLED (full power FPV)\n");
-        }
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        if (pit_mode_enabled) {
-            pit_mode_function = pit_mode_enable_8812eu2;
-            printf("PIT mode: RTL8812EU ENABLED (low power standby)\n");
-        } else {
-            pit_mode_function = pit_mode_disable_8812eu2;
-            printf("PIT mode: RTL8812EU DISABLED (full power FPV)\n");
-        }
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        if (pit_mode_enabled) {
-            pit_mode_function = pit_mode_enable_873xbu;
-            printf("PIT mode: RTL873xBU ENABLED (low power standby)\n");
-        } else {
-            pit_mode_function = pit_mode_disable_873xbu;
-            printf("PIT mode: RTL873xBU DISABLED (full power FPV)\n");
-        }
-    } else {
-        printf("PIT mode: ERROR - Unknown WiFi card type: %s\n", wificard);
+        printf("PIT mode: %s DISABLED (full power FPV)\n", wificard);
+    }
+}
+
+// Initialize race mode configuration
+void init_race_mode() {
+    if (race_mode != 1 && race_mode != 0) {
+        printf("ERROR: Invalid value for race_mode: %d (must be 0 or 1)\n", race_mode);
         return;
     }
+    
+    if (race_mode == 1) {
+        printf("RACEMODE ENABLED - Configuring for racing performance\n");
+        
+        // Set ACK timeout for racing (lower latency)
+        char cmd1[512];
+        snprintf(cmd1, sizeof(cmd1), "echo 20 > %s/ack_timeout", driverpath);
+        int ack_result = execute_command(cmd1);
+        if (ack_result != 0) {
+#ifdef DEBUG
+            printf("Warning: Failed to set ack_timeout\n");
+#endif
+        }
+        
+        // Override bitrate max for racing (4 Mbps)
+        bitrate_max = 4;
+        printf("Racing mode: Bitrate max set to %d Mbps\n", bitrate_max);
+        
+        
+        } else {
+        printf("Normal mode ENABLED - Configuring for stability\n");
+    }
+}
+
+// Initialize HTTP system and video configuration
+void init_http_system() {
+    printf("HTTP system: Initializing video configuration\n");
+    
+    if (race_mode == 1) {
+        // Configure racing video settings
+        char video_config[256];
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.size=%s", racing_video_resolution);
+        http_get(video_config);
+        
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.fps=%d", racing_fps);
+        http_get(video_config);
+        
+        // Calculate optimal exposure based on frame rate (180° shutter rule)
+        int calculated_exposure = auto_exposure_enabled ? calculate_racing_exposure() : racing_exposure;
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", calculated_exposure);
+        http_get(video_config);
+        
+        if (auto_exposure_enabled) {
+            printf("HTTP: Racing mode video configured - %s@%dfps, exposure=%dms\n", 
+                   racing_video_resolution, racing_fps, calculated_exposure);
+        }
+        
+    } else {
+        // Set normal mode video configuration
+        char video_config[256];
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.fps=%d", fps);
+        http_get(video_config);
+        
+        // Calculate optimal exposure based on frame rate (180° shutter rule)
+        int calculated_exposure = auto_exposure_enabled ? calculate_normal_exposure() : 8; // Default fallback
+        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", calculated_exposure);
+        http_get(video_config);
+        
+        if (auto_exposure_enabled) {
+            printf("HTTP: Normal mode video configured - %dfps, exposure=%dms\n", 
+                   fps, calculated_exposure);
+        }
+    }
+    
+    printf("HTTP system: Video configuration complete\n");
 }
 
 // Global sleep configuration (not static - needs to persist and be accessible)
@@ -953,6 +1368,20 @@ static pid_controller_t bitrate_pid = {
     .last_output = 0    // No previous output
 };
 
+// Initialize control algorithm function pointer (call once at startup)
+void init_control_algorithm() {
+    // Set function pointer based on control algorithm configuration (never changes during runtime)
+    if (control_algorithm == CONTROL_ALGORITHM_PID) {
+        control_algorithm_function = pid_control_algorithm;
+        // Initialize PID controller only when PID algorithm is selected
+        pid_init(&bitrate_pid, pid_kp, pid_ki, pid_kd);
+        printf("Control algorithm: PID Controller (smooth transitions)\n");
+    } else {
+        control_algorithm_function = fifo_control_algorithm;
+        printf("Control algorithm: Simple FIFO (fast, direct)\n");
+    }
+}
+
 // ArduPilot-style Low-Pass Filter Functions
 // Calculate alpha coefficient for low-pass filter
 float calc_lowpass_alpha_dt(float dt, float cutoff_freq) {
@@ -964,7 +1393,7 @@ float calc_lowpass_alpha_dt(float dt, float cutoff_freq) {
     return dt / (rc + dt);
 }
 
-// Initialize low-pass filter
+// ArduPilot-style Low-Pass Filter Functions
 void init_lowpass_filter(lowpass_filter_t *filter, float cutoff_freq, float sample_freq) {
     filter->cutoff_freq = cutoff_freq;
     filter->sample_freq = sample_freq;
@@ -1047,80 +1476,9 @@ void init_2pole_lpf(lpf_2pole_t *filter, float cutoff_freq, float sample_freq) {
 #endif
 }
 
-// Filter Chain Functions
-// Apply a complete filter chain to a sample (optimized for WyvernLink 100mW)
-float apply_filter_chain(filter_chain_t *chain, float sample) {
-    if (!chain->enabled || chain->filter_count == 0) {
-        return sample;
-    }
-    
-    float filtered_sample = sample;
-    
-#ifdef DEBUG
-    // Centralized error checking and logging
-    char error_message[512] = {0};
-    char log_buffer[1024] = {0};
-    bool has_errors = false;
-    bool has_warnings = false;
-#endif
-    
-    // Pre-initialize all filters that need initialization (moved to top for consistency)
-    // This eliminates redundant checks throughout the switch statement
-    for (uint8_t i = 0; i < chain->filter_count; i++) {
-        filter_type_t filter_type = chain->filters[i];
-        
-        switch (filter_type) {
-            case FILTER_TYPE_LOWPASS: {
-                lowpass_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_lpf : &dbm_lpf;
-                if (!filter->initialised) {
-                    filter->output = filtered_sample;
-                    filter->initialised = true;
-#ifdef DEBUG
-                    snprintf(log_buffer + strlen(log_buffer), sizeof(log_buffer) - strlen(log_buffer), 
-                             "Low-Pass initialized (%.1f), ", filtered_sample);
-#endif
-                }
-                break;
-            }
-            case FILTER_TYPE_2POLE_LPF: {
-                lpf_2pole_t *filter = (chain == &rssi_filter_chain) ? &rssi_2pole_lpf : &dbm_2pole_lpf;
-                if (!filter->initialised) {
-                    filter->output = filtered_sample;
-                    filter->delay_element_1 = filtered_sample;
-                    filter->delay_element_2 = filtered_sample;
-                    filter->initialised = true;
-#ifdef DEBUG
-                    snprintf(log_buffer + strlen(log_buffer), sizeof(log_buffer) - strlen(log_buffer), 
-                             "2-Pole LPF initialized (%.1f), ", filtered_sample);
-#endif
-                }
-                break;
-            }
-            case FILTER_TYPE_GAUSSIAN: {
-                gaussian_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_gaussian_filter : &dbm_gaussian_filter;
-                if (!filter->weights_initialized) {
-                    init_gaussian_weights(filter);
-#ifdef DEBUG
-                    snprintf(log_buffer + strlen(log_buffer), sizeof(log_buffer) - strlen(log_buffer), 
-                             "Gaussian weights initialized, ");
-#endif
-                }
-                break;
-            }
-            default:
-                // Other filters don't need initialization
-                break;
-        }
-    }
-    
-    // Apply each filter in the chain sequentially (inlined for performance)
-    for (uint8_t i = 0; i < chain->filter_count; i++) {
-        filter_type_t filter_type = chain->filters[i];
-        
-        switch (filter_type) {
-            case FILTER_TYPE_KALMAN: {
-                // Inlined Kalman filter logic
-                kalman_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_filter : &dbm_filter;
+// Individual Filter Processing Functions (for lookup table)
+static float process_kalman_filter(float sample, void* filter_data, bool is_rssi) {
+    kalman_filter_t *filter = (kalman_filter_t*)filter_data;
                 
                 // Prediction step - predict next state
                 float predicted_estimate = filter->estimate;
@@ -1133,34 +1491,25 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                 if (kalman_gain > 1.0f) kalman_gain = 1.0f;
                 if (kalman_gain < 0.0f) kalman_gain = 0.0f;
                 
-                filter->estimate = predicted_estimate + kalman_gain * (filtered_sample - predicted_estimate);
+    filter->estimate = predicted_estimate + kalman_gain * (sample - predicted_estimate);
                 filter->error_estimate = (1.0f - kalman_gain) * predicted_error;
                 
                 // Prevent error estimate from becoming too small (numerical stability)
                 if (filter->error_estimate < KALMAN_MIN_ERROR_ESTIMATE) {
                     filter->error_estimate = KALMAN_MIN_ERROR_ESTIMATE;
-#ifdef DEBUG
-                    has_warnings = true;
-                    snprintf(error_message + strlen(error_message), sizeof(error_message) - strlen(error_message), 
-                             "Kalman error estimate clamped, ");
-#endif
-                }
-                
-                filtered_sample = filter->estimate;
-                break;
-            }
-                
-            case FILTER_TYPE_LOWPASS: {
-                // Inlined Low-Pass filter logic (initialization already handled above)
-                lowpass_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_lpf : &dbm_lpf;
-                filter->output += (filtered_sample - filter->output) * filter->alpha;
-                filtered_sample = filter->output;
-                break;
-            }
-                
-            case FILTER_TYPE_MODE: {
-                // Inlined Mode filter logic
-                mode_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_mode_filter : &dbm_mode_filter;
+    }
+    
+    return filter->estimate;
+}
+
+static float process_lowpass_filter(float sample, void* filter_data, bool is_rssi) {
+    lowpass_filter_t *filter = (lowpass_filter_t*)filter_data;
+    filter->output += (sample - filter->output) * filter->alpha;
+    return filter->output;
+}
+
+static float process_mode_filter(float sample, void* filter_data, bool is_rssi) {
+    mode_filter_t *filter = (mode_filter_t*)filter_data;
                 
                 // Insertion sort for mode filter (alternates dropping high/low samples)
                 uint8_t j;
@@ -1176,25 +1525,25 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                     j = filter->sample_index - 1;
                     
                     // Shift samples down to make room
-                    while (j > 0 && filter->samples[j-1] > filtered_sample) {
+        while (j > 0 && filter->samples[j-1] > sample) {
                         filter->samples[j] = filter->samples[j-1];
                         j--;
                     }
                     
                     // Insert new sample
-                    filter->samples[j] = filtered_sample;
+        filter->samples[j] = sample;
                 } else {
                     // Drop lowest sample - start from bottom
                     j = 0;
                     
                     // Shift samples up to make room
-                    while (j < filter->sample_index - 1 && filter->samples[j+1] < filtered_sample) {
+        while (j < filter->sample_index - 1 && filter->samples[j+1] < sample) {
                         filter->samples[j] = filter->samples[j+1];
                         j++;
                     }
                     
                     // Insert new sample
-                    filter->samples[j] = filtered_sample;
+        filter->samples[j] = sample;
                 }
                 
                 // Alternate drop direction for next sample
@@ -1208,13 +1557,11 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                     filter->output = filter->samples[filter->return_element];
                 }
                 
-                filtered_sample = filter->output;
-                break;
+    return filter->output;
             }
                 
-            case FILTER_TYPE_DERIVATIVE: {
-                // Inlined Derivative filter logic
-                derivative_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_derivative_filter : &dbm_derivative_filter;
+static float process_derivative_filter(float sample, void* filter_data, bool is_rssi) {
+    derivative_filter_t *filter = (derivative_filter_t*)filter_data;
                 
                 uint32_t current_time = (uint32_t)(get_current_time_ms());
                 uint8_t j = filter->sample_index;
@@ -1228,17 +1575,12 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                 
                 // Check if this is a new timestamp
                 if (filter->timestamps[j1] == current_time) {
-#ifdef DEBUG
-                    has_warnings = true;
-                    snprintf(error_message + strlen(error_message), sizeof(error_message) - strlen(error_message), 
-                             "Derivative duplicate timestamp, ");
-#endif
-                    break; // Ignore duplicate timestamp
+        return sample; // Ignore duplicate timestamp
                 }
                 
                 // Store timestamp and sample
                 filter->timestamps[j] = current_time;
-                filter->samples[j] = filtered_sample;
+    filter->samples[j] = sample;
                 
                 // Update sample index
                 filter->sample_index = (filter->sample_index + 1) % DERIVATIVE_FILTER_SIZE;
@@ -1246,16 +1588,14 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                 
                 // Return the most recent sample (derivative is available via slope function)
                 uint8_t idx = (filter->sample_index - 1 + DERIVATIVE_FILTER_SIZE) % DERIVATIVE_FILTER_SIZE;
-                filtered_sample = filter->samples[idx];
-                break;
+    return filter->samples[idx];
             }
                 
-            case FILTER_TYPE_2POLE_LPF: {
-                // Inlined 2-Pole Low-Pass filter logic (initialization already handled above)
-                lpf_2pole_t *filter = (chain == &rssi_filter_chain) ? &rssi_2pole_lpf : &dbm_2pole_lpf;
+static float process_2pole_lpf_filter(float sample, void* filter_data, bool is_rssi) {
+    lpf_2pole_t *filter = (lpf_2pole_t*)filter_data;
                 
                 // Apply biquad filter using pre-calculated coefficients (no expensive trig functions!)
-                float output = filter->b0 * filtered_sample + filter->b1 * filter->delay_element_1 + filter->b2 * filter->delay_element_2
+    float output = filter->b0 * sample + filter->b1 * filter->delay_element_1 + filter->b2 * filter->delay_element_2
                                - filter->a1 * filter->delay_element_1 - filter->a2 * filter->delay_element_2;
                 
                 // Update delay elements
@@ -1263,22 +1603,19 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                 filter->delay_element_1 = output;
                 
                 filter->output = output;
-                filtered_sample = output;
-                break;
+    return output;
             }
                 
-            case FILTER_TYPE_MEAN: {
-                // Inlined Mean filter logic
-                mean_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_mean_filter : &dbm_mean_filter;
+static float process_mean_filter(float sample, void* filter_data, bool is_rssi) {
+    mean_filter_t *filter = (mean_filter_t*)filter_data;
                 
                 // If buffer isn't full yet, just add to sum
                 if (filter->sample_count < MEAN_FILTER_SIZE) {
-                    filter->samples[filter->sample_count] = filtered_sample;
-                    filter->sum += filtered_sample;
+        filter->samples[filter->sample_count] = sample;
+        filter->sum += sample;
                     filter->sample_count++;
                     filter->output = filter->sum / filter->sample_count;
-                    filtered_sample = filter->output;
-                    break;
+        return filter->output;
                 }
                 
                 // Buffer is full, use circular buffer
@@ -1286,8 +1623,8 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                 filter->sum -= filter->samples[filter->sample_index];
                 
                 // Add new sample
-                filter->samples[filter->sample_index] = filtered_sample;
-                filter->sum += filtered_sample;
+    filter->samples[filter->sample_index] = sample;
+    filter->sum += sample;
                 
                 // Calculate mean
                 filter->output = filter->sum / MEAN_FILTER_SIZE;
@@ -1295,17 +1632,15 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                 // Update circular buffer index
                 filter->sample_index = (filter->sample_index + 1) % MEAN_FILTER_SIZE;
                 
-                filtered_sample = filter->output;
-                break;
+    return filter->output;
             }
                 
-            case FILTER_TYPE_GAUSSIAN: {
-                // Inlined Gaussian filter logic (weights initialization already handled above)
-                gaussian_filter_t *filter = (chain == &rssi_filter_chain) ? &rssi_gaussian_filter : &dbm_gaussian_filter;
+static float process_gaussian_filter(float sample, void* filter_data, bool is_rssi) {
+    gaussian_filter_t *filter = (gaussian_filter_t*)filter_data;
                 
                 // If buffer isn't full yet, just add to buffer
                 if (filter->sample_count < GAUSSIAN_FILTER_SIZE) {
-                    filter->samples[filter->sample_count] = filtered_sample;
+        filter->samples[filter->sample_count] = sample;
                     filter->sample_count++;
                     
                     // Calculate weighted average with available samples
@@ -1316,13 +1651,12 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                         weight_sum += filter->weights[j];
                     }
                     filter->output = weighted_sum / weight_sum;
-                    filtered_sample = filter->output;
-                    break;
+        return filter->output;
                 }
                 
                 // Buffer is full, use circular buffer
                 // Store new sample at current index
-                filter->samples[filter->sample_index] = filtered_sample;
+    filter->samples[filter->sample_index] = sample;
                 
                 // Calculate Gaussian-weighted average using pre-calculated weights
                 float weighted_sum = 0.0f;
@@ -1334,19 +1668,278 @@ float apply_filter_chain(filter_chain_t *chain, float sample) {
                 // Update circular buffer index
                 filter->sample_index = (filter->sample_index + 1) % GAUSSIAN_FILTER_SIZE;
                 
-                filtered_sample = filter->output;
-                break;
-            }
-                
-            default:
-                // Unknown filter type, pass through unchanged
+    return filter->output;
+}
+
+// Filter initialization functions
+static void init_kalman_filter(void* filter_data, bool is_rssi) {
+    // Kalman filters are initialized elsewhere with process/measurement variance
+    (void)filter_data;  // Suppress unused parameter warning
+    (void)is_rssi;     // Suppress unused parameter warning
+}
+
+static void init_lowpass_filter_wrapper(void* filter_data, bool is_rssi) {
+    lowpass_filter_t *filter = (lowpass_filter_t*)filter_data;
+    filter->output = DEFAULT_RSSI_ESTIMATE;
+    filter->initialised = false;
+}
+
+static void init_mode_filter_wrapper(void* filter_data, bool is_rssi) {
+    mode_filter_t *filter = (mode_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->drop_high_sample = true;
+    filter->return_element = DEFAULT_MODE_FILTER_RETURN_ELEMENT;
+}
+
+static void init_derivative_filter_wrapper(void* filter_data, bool is_rssi) {
+    derivative_filter_t *filter = (derivative_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->new_data = false;
+}
+
+static void init_2pole_lpf_filter_wrapper(void* filter_data, bool is_rssi) {
+    lpf_2pole_t *filter = (lpf_2pole_t*)filter_data;
+    filter->output = DEFAULT_RSSI_ESTIMATE;
+    filter->delay_element_1 = DEFAULT_RSSI_ESTIMATE;
+    filter->delay_element_2 = DEFAULT_RSSI_ESTIMATE;
+    filter->initialised = false;
+}
+
+static void init_mean_filter_wrapper(void* filter_data, bool is_rssi) {
+    mean_filter_t *filter = (mean_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->sample_count = 0;
+    filter->sum = 0.0f;
+    filter->output = DEFAULT_RSSI_ESTIMATE;
+}
+
+static void init_gaussian_filter_wrapper(void* filter_data, bool is_rssi) {
+    gaussian_filter_t *filter = (gaussian_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->sample_count = 0;
+    filter->output = DEFAULT_RSSI_ESTIMATE;
+    init_gaussian_weights(filter);
+}
+
+// Filter reset functions
+static void reset_kalman_filter(void* filter_data, bool is_rssi) {
+    kalman_filter_t *filter = (kalman_filter_t*)filter_data;
+    filter->estimate = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
+    filter->error_estimate = DEFAULT_ERROR_ESTIMATE;
+}
+
+static void reset_lowpass_filter(void* filter_data, bool is_rssi) {
+    lowpass_filter_t *filter = (lowpass_filter_t*)filter_data;
+    filter->output = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
+    filter->initialised = false;
+}
+
+static void reset_mode_filter(void* filter_data, bool is_rssi) {
+    mode_filter_t *filter = (mode_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->drop_high_sample = true;
+    filter->output = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
+}
+
+static void reset_derivative_filter(void* filter_data, bool is_rssi) {
+    derivative_filter_t *filter = (derivative_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->new_data = false;
+}
+
+static void reset_2pole_lpf_filter(void* filter_data, bool is_rssi) {
+    lpf_2pole_t *filter = (lpf_2pole_t*)filter_data;
+    float default_value = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
+    filter->output = default_value;
+    filter->delay_element_1 = default_value;
+    filter->delay_element_2 = default_value;
+    filter->initialised = false;
+}
+
+static void reset_mean_filter(void* filter_data, bool is_rssi) {
+    mean_filter_t *filter = (mean_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->sample_count = 0;
+    filter->sum = 0.0f;
+    filter->output = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
+}
+
+static void reset_gaussian_filter(void* filter_data, bool is_rssi) {
+    gaussian_filter_t *filter = (gaussian_filter_t*)filter_data;
+    filter->sample_index = 0;
+    filter->sample_count = 0;
+    filter->output = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
+}
+
+// Filter lookup table - maps filter types to their processing functions
+static const filter_lookup_entry_t filter_lookup_table[] = {
+    [FILTER_TYPE_KALMAN] = {
+        .process_func = process_kalman_filter,
+        .init_func = init_kalman_filter,
+        .reset_func = reset_kalman_filter,
+        .name = "Kalman"
+    },
+    [FILTER_TYPE_LOWPASS] = {
+        .process_func = process_lowpass_filter,
+        .init_func = init_lowpass_filter_wrapper,
+        .reset_func = reset_lowpass_filter,
+        .name = "Low-Pass"
+    },
+    [FILTER_TYPE_MODE] = {
+        .process_func = process_mode_filter,
+        .init_func = init_mode_filter_wrapper,
+        .reset_func = reset_mode_filter,
+        .name = "Mode"
+    },
+    [FILTER_TYPE_DERIVATIVE] = {
+        .process_func = process_derivative_filter,
+        .init_func = init_derivative_filter_wrapper,
+        .reset_func = reset_derivative_filter,
+        .name = "Derivative"
+    },
+    [FILTER_TYPE_2POLE_LPF] = {
+        .process_func = process_2pole_lpf_filter,
+        .init_func = init_2pole_lpf_filter_wrapper,
+        .reset_func = reset_2pole_lpf_filter,
+        .name = "2-Pole LPF"
+    },
+    [FILTER_TYPE_MEAN] = {
+        .process_func = process_mean_filter,
+        .init_func = init_mean_filter_wrapper,
+        .reset_func = reset_mean_filter,
+        .name = "Mean"
+    },
+    [FILTER_TYPE_GAUSSIAN] = {
+        .process_func = process_gaussian_filter,
+        .init_func = init_gaussian_filter_wrapper,
+        .reset_func = reset_gaussian_filter,
+        .name = "Gaussian"
+    }
+};
+
+// Pre-calculated constant for filter lookup table size (never changes at runtime)
+static const int FILTER_LOOKUP_TABLE_SIZE = sizeof(filter_lookup_table) / sizeof(filter_lookup_table[0]);
+
+// Helper function to get filter data pointer using instances lookup table
+static void* get_filter_data(filter_chain_t *chain, filter_type_t filter_type) {
+    // Bounds check using pre-calculated constant
+    if (filter_type >= FILTER_INSTANCES_TABLE_SIZE) {
+        return NULL;
+    }
+    
+    const filter_instances_t *instances = &filter_instances_table[filter_type];
+    bool is_rssi = (chain == &rssi_filter_chain);
+    
+    return is_rssi ? instances->rssi_instance : instances->dbm_instance;
+}
+
+// Filter Chain Functions
+// Apply a complete filter chain to a sample (optimized with lookup tables)
+float apply_filter_chain(filter_chain_t *chain, float sample) {
+    if (!chain->enabled || chain->filter_count == 0) {
+        return sample;
+    }
+    
+    float filtered_sample = sample;
+    
+#ifdef DEBUG
+    // Centralized error checking and logging
+    char error_message[512] = {0};
+    char log_buffer[1024] = {0};
+    bool has_errors = false;
+    bool has_warnings = false;
+#endif
+    
+    // Pre-initialize all filters that need initialization using lookup table
+    for (uint8_t i = 0; i < chain->filter_count; i++) {
+        filter_type_t filter_type = chain->filters[i];
+        
+        // Bounds check for lookup table
+        if (filter_type >= FILTER_LOOKUP_TABLE_SIZE) {
 #ifdef DEBUG
                 has_errors = true;
                 snprintf(error_message + strlen(error_message), sizeof(error_message) - strlen(error_message), 
-                         "Unknown filter type %d, ", filter_type);
+                     "Invalid filter type %d, ", filter_type);
 #endif
-                break;
+            continue;
         }
+        
+        const filter_lookup_entry_t *entry = &filter_lookup_table[filter_type];
+        void* filter_data = get_filter_data(chain, filter_type);
+        
+        if (!filter_data || !entry->init_func) {
+#ifdef DEBUG
+            has_errors = true;
+            snprintf(error_message + strlen(error_message), sizeof(error_message) - strlen(error_message), 
+                     "Missing filter data or init function for type %d, ", filter_type);
+#endif
+            continue;
+        }
+        
+        // Special initialization logic for filters that need it
+        if (filter_type == FILTER_TYPE_LOWPASS) {
+            lowpass_filter_t *filter = (lowpass_filter_t*)filter_data;
+            if (!filter->initialised) {
+                filter->output = filtered_sample;
+                filter->initialised = true;
+#ifdef DEBUG
+                snprintf(log_buffer + strlen(log_buffer), sizeof(log_buffer) - strlen(log_buffer), 
+                         "Low-Pass initialized (%.1f), ", filtered_sample);
+#endif
+            }
+        } else if (filter_type == FILTER_TYPE_2POLE_LPF) {
+            lpf_2pole_t *filter = (lpf_2pole_t*)filter_data;
+            if (!filter->initialised) {
+                filter->output = filtered_sample;
+                filter->delay_element_1 = filtered_sample;
+                filter->delay_element_2 = filtered_sample;
+                filter->initialised = true;
+#ifdef DEBUG
+                snprintf(log_buffer + strlen(log_buffer), sizeof(log_buffer) - strlen(log_buffer), 
+                         "2-Pole LPF initialized (%.1f), ", filtered_sample);
+#endif
+            }
+        } else if (filter_type == FILTER_TYPE_GAUSSIAN) {
+            gaussian_filter_t *filter = (gaussian_filter_t*)filter_data;
+            if (!filter->weights_initialized) {
+                init_gaussian_weights(filter);
+#ifdef DEBUG
+                snprintf(log_buffer + strlen(log_buffer), sizeof(log_buffer) - strlen(log_buffer), 
+                         "Gaussian weights initialized, ");
+#endif
+            }
+        }
+    }
+    
+    // Apply each filter in the chain sequentially using lookup table
+    for (uint8_t i = 0; i < chain->filter_count; i++) {
+        filter_type_t filter_type = chain->filters[i];
+        
+        // Bounds check for lookup table
+        if (filter_type >= FILTER_LOOKUP_TABLE_SIZE) {
+#ifdef DEBUG
+            has_errors = true;
+            snprintf(error_message + strlen(error_message), sizeof(error_message) - strlen(error_message), 
+                     "Invalid filter type %d, ", filter_type);
+#endif
+            continue;
+        }
+        
+        const filter_lookup_entry_t *entry = &filter_lookup_table[filter_type];
+        void* filter_data = get_filter_data(chain, filter_type);
+        
+        if (!filter_data || !entry->process_func) {
+#ifdef DEBUG
+            has_errors = true;
+            snprintf(error_message + strlen(error_message), sizeof(error_message) - strlen(error_message), 
+                     "Missing filter data or process function for type %d, ", filter_type);
+#endif
+            continue;
+        }
+        
+        // Process sample through filter using lookup table
+        bool is_rssi = (chain == &rssi_filter_chain);
+        filtered_sample = entry->process_func(filtered_sample, filter_data, is_rssi);
     }
     
 #ifdef DEBUG
@@ -1391,16 +1984,18 @@ void set_filter_chain(const char *config_str, filter_chain_t *chain) {
     chain->filter_count = count;
     free(config_copy);
     
-    // Print filter chain configuration
+    // Print filter chain configuration using lookup table
 #ifdef DEBUG
     printf("Filter chain configured: ");
     for (uint8_t i = 0; i < count; i++) {
-        const char *filter_name = (chain->filters[i] == FILTER_TYPE_KALMAN) ? "Kalman" :
-                                 (chain->filters[i] == FILTER_TYPE_LOWPASS) ? "Low-Pass" :
-                                 (chain->filters[i] == FILTER_TYPE_MODE) ? "Mode" :
-                                 (chain->filters[i] == FILTER_TYPE_DERIVATIVE) ? "Derivative" :
-                                 (chain->filters[i] == FILTER_TYPE_2POLE_LPF) ? "2-Pole LPF" :
-                                 (chain->filters[i] == FILTER_TYPE_MEAN) ? "Mean" : "Gaussian";
+        filter_type_t filter_type = chain->filters[i];
+        const char *filter_name = "Unknown";
+        
+        // Use lookup table for filter names
+        if (filter_type < FILTER_LOOKUP_TABLE_SIZE) {
+            filter_name = filter_lookup_table[filter_type].name;
+        }
+        
         printf("%s", filter_name);
         if (i < count - 1) printf(" -> ");
     }
@@ -1408,94 +2003,26 @@ void set_filter_chain(const char *config_str, filter_chain_t *chain) {
 #endif
 }
 
-// Reset all filters in a chain (inlined for performance)
+// Reset all filters in a chain using lookup table
 void reset_filter_chain(filter_chain_t *chain) {
     for (uint8_t i = 0; i < chain->filter_count; i++) {
         filter_type_t filter_type = chain->filters[i];
         
-        switch (filter_type) {
-            case FILTER_TYPE_KALMAN:
-                if (chain == &rssi_filter_chain) {
-                    rssi_filter.estimate = DEFAULT_RSSI_ESTIMATE;
-                    rssi_filter.error_estimate = DEFAULT_ERROR_ESTIMATE;
-                } else {
-                    dbm_filter.estimate = DEFAULT_DBM_ESTIMATE;
-                    dbm_filter.error_estimate = DEFAULT_ERROR_ESTIMATE;
-                }
-                break;
-                
-            case FILTER_TYPE_LOWPASS:
-                if (chain == &rssi_filter_chain) {
-                    rssi_lpf.output = DEFAULT_RSSI_ESTIMATE;
-                    rssi_lpf.initialised = false;
-                } else {
-                    dbm_lpf.output = DEFAULT_DBM_ESTIMATE;
-                    dbm_lpf.initialised = false;
-                }
-                break;
-                
-            case FILTER_TYPE_MODE:
-                if (chain == &rssi_filter_chain) {
-                    rssi_mode_filter.sample_index = 0;
-                    rssi_mode_filter.drop_high_sample = true;
-                    rssi_mode_filter.output = DEFAULT_RSSI_ESTIMATE;
-                } else {
-                    dbm_mode_filter.sample_index = 0;
-                    dbm_mode_filter.drop_high_sample = true;
-                    dbm_mode_filter.output = DEFAULT_DBM_ESTIMATE;
-                }
-                break;
-                
-            case FILTER_TYPE_DERIVATIVE:
-                if (chain == &rssi_filter_chain) {
-                    rssi_derivative_filter.sample_index = 0;
-                    rssi_derivative_filter.new_data = false;
-                } else {
-                    dbm_derivative_filter.sample_index = 0;
-                    dbm_derivative_filter.new_data = false;
-                }
-                break;
-                
-            case FILTER_TYPE_2POLE_LPF:
-                if (chain == &rssi_filter_chain) {
-                    rssi_2pole_lpf.output = DEFAULT_RSSI_ESTIMATE;
-                    rssi_2pole_lpf.delay_element_1 = DEFAULT_RSSI_ESTIMATE;
-                    rssi_2pole_lpf.delay_element_2 = DEFAULT_RSSI_ESTIMATE;
-                    rssi_2pole_lpf.initialised = false;
-                } else {
-                    dbm_2pole_lpf.output = DEFAULT_DBM_ESTIMATE;
-                    dbm_2pole_lpf.delay_element_1 = DEFAULT_DBM_ESTIMATE;
-                    dbm_2pole_lpf.delay_element_2 = DEFAULT_DBM_ESTIMATE;
-                    dbm_2pole_lpf.initialised = false;
-                }
-                break;
-                
-            case FILTER_TYPE_MEAN:
-                if (chain == &rssi_filter_chain) {
-                    rssi_mean_filter.sample_index = 0;
-                    rssi_mean_filter.sample_count = 0;
-                    rssi_mean_filter.sum = 0.0f;
-                    rssi_mean_filter.output = DEFAULT_RSSI_ESTIMATE;
-                } else {
-                    dbm_mean_filter.sample_index = 0;
-                    dbm_mean_filter.sample_count = 0;
-                    dbm_mean_filter.sum = 0.0f;
-                    dbm_mean_filter.output = DEFAULT_DBM_ESTIMATE;
-                }
-                break;
-                
-            case FILTER_TYPE_GAUSSIAN:
-                if (chain == &rssi_filter_chain) {
-                    rssi_gaussian_filter.sample_index = 0;
-                    rssi_gaussian_filter.sample_count = 0;
-                    rssi_gaussian_filter.output = DEFAULT_RSSI_ESTIMATE;
-                } else {
-                    dbm_gaussian_filter.sample_index = 0;
-                    dbm_gaussian_filter.sample_count = 0;
-                    dbm_gaussian_filter.output = DEFAULT_DBM_ESTIMATE;
-                }
-                break;
+        // Bounds check for lookup table
+        if (filter_type >= FILTER_LOOKUP_TABLE_SIZE) {
+            continue; // Skip invalid filter types
         }
+        
+        const filter_lookup_entry_t *entry = &filter_lookup_table[filter_type];
+        void* filter_data = get_filter_data(chain, filter_type);
+        
+        if (!filter_data || !entry->reset_func) {
+            continue; // Skip if no data or reset function
+        }
+        
+        // Reset filter using lookup table
+        bool is_rssi = (chain == &rssi_filter_chain);
+        entry->reset_func(filter_data, is_rssi);
     }
 }
 
@@ -1516,10 +2043,27 @@ void toggle_racemode(void) {
     }
 }
 
-// Initialize only the filters that are actually used in the active filter chains
+// Initialize filters and set up filter chains based on race mode
 void init_filters(float rssi_process_var, float rssi_measure_var,
                  float dbm_process_var, float dbm_measure_var,
                  float lpf_cutoff_freq, float lpf_sample_freq) {
+    
+    // Set and configure filter chains based on race_mode
+    if (race_mode) {
+        // Racing mode - only initialize racing filters
+        set_filter_chain(racing_rssi_filter_chain_config, &rssi_race_filter_chain);
+        set_filter_chain(racing_dbm_filter_chain_config, &dbm_race_filter_chain);
+        active_rssi_filter_chain = &rssi_race_filter_chain;
+        active_dbm_filter_chain = &dbm_race_filter_chain;
+        printf("Racing mode ENABLED - Using low-pass filters for fast response\n");
+    } else {
+        // Normal mode - only initialize normal filters
+        set_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
+        set_filter_chain(dbm_filter_chain_config, &dbm_filter_chain);
+        active_rssi_filter_chain = &rssi_filter_chain;
+        active_dbm_filter_chain = &dbm_filter_chain;
+        printf("Normal mode ENABLED - Using Kalman filters for stability\n");
+    }
     
     // Only initialize filters if the active filter chains are properly set
     if (active_rssi_filter_chain && active_dbm_filter_chain) {
@@ -1550,8 +2094,16 @@ void init_filter_chain_filters(filter_chain_t *chain, float process_var, float m
         filter_type_t filter_type = chain->filters[i];
         
         switch (filter_type) {
+            case FILTER_TYPE_LOWPASS: {
+                lowpass_filter_t *filter = is_rssi ? &rssi_lowpass_filter : &dbm_lowpass_filter;
+                init_lowpass_filter(filter, lpf_cutoff_freq, lpf_sample_freq);
+#ifdef DEBUG
+                printf("Low-pass filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
+#endif
+                break;
+            }
             case FILTER_TYPE_KALMAN: {
-                kalman_filter_t *filter = is_rssi ? &rssi_filter : &dbm_filter;
+                kalman_filter_t *filter = is_rssi ? &rssi_kalman_filter : &dbm_kalman_filter;
                 filter->process_variance = process_var;
                 filter->measurement_variance = measure_var;
                 filter->estimate = is_rssi ? DEFAULT_RSSI_ESTIMATE : DEFAULT_DBM_ESTIMATE;
@@ -1561,16 +2113,8 @@ void init_filter_chain_filters(filter_chain_t *chain, float process_var, float m
 #endif
                 break;
             }
-            
-            case FILTER_TYPE_LOWPASS: {
-                lowpass_filter_t *filter = is_rssi ? &rssi_lpf : &dbm_lpf;
-                init_lowpass_filter(filter, lpf_cutoff_freq, lpf_sample_freq);
-#ifdef DEBUG
-                printf("Low-pass filter initialized for %s\n", is_rssi ? "RSSI" : "dBm");
-#endif
-                break;
-            }
-            
+    
+    
             case FILTER_TYPE_MODE: {
                 mode_filter_t *filter = is_rssi ? &rssi_mode_filter : &dbm_mode_filter;
                 filter->return_element = DEFAULT_MODE_FILTER_RETURN_ELEMENT;
@@ -1579,7 +2123,6 @@ void init_filter_chain_filters(filter_chain_t *chain, float process_var, float m
 #endif
                 break;
             }
-            
             case FILTER_TYPE_DERIVATIVE: {
                 // Derivative filters are initialized by default
 #ifdef DEBUG
@@ -1596,7 +2139,7 @@ void init_filter_chain_filters(filter_chain_t *chain, float process_var, float m
 #endif
                 break;
             }
-            
+    
             case FILTER_TYPE_MEAN: {
                 // Mean filters are initialized by default
 #ifdef DEBUG
@@ -1698,6 +2241,8 @@ void pid_init(pid_controller_t *pid, float kp, float ki, float kd) {
     pid->ki = ki;
     pid->kd = kd;
     pid_reset(pid);
+    
+    printf("PID Controller initialized: Kp=%.2f, Ki=%.2f, Kd=%.2f\n", kp, ki, kd);
 }
 
 // Check if bitrate change should be allowed based on asymmetric cooldown
@@ -1758,7 +2303,9 @@ void check_emergency_drop(int current_bitrate, float filtered_rssi,
         
         // Reset all filters and PID controller to adapt to new conditions
         reset_filters();
+        if (control_algorithm == CONTROL_ALGORITHM_PID) {
         pid_reset(&bitrate_pid);
+        }
         
         // CRITICAL: Re-disable power saving after emergency recovery
         // Ensures stable connection during recovery
@@ -1775,30 +2322,20 @@ void disable_autopower() {
         return;
     }
     
-    // Different commands for different drivers
-    char command[128];
-    if (strcmp(wificard, "8812au") == 0) {
-        // RTL8812AU: Use iw command to disable power saving
-        snprintf(command, sizeof(command), "iw wlan0 set power_save off");
-        printf("Disabling power saving for RTL8812AU (8812au driver)...\n");
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        // RTL8812EU: Use iw command to disable power saving
-        snprintf(command, sizeof(command), "iw wlan0 set power_save off");
-        printf("Disabling power saving for RTL8812EU (8812eu2 driver)...\n");
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        // RTL873xBU: Use iw command to disable power saving
-        snprintf(command, sizeof(command), "iw wlan0 set power_save off");
-        printf("Disabling power saving for RTL873xBU (873xbu driver)...\n");
-    } else {
+    // Get WiFi card configuration from lookup table
+    const wifi_card_config_t* config = get_wifi_card_config(wificard);
+    if (!config) {
         printf("ERROR: Unknown WiFi card type for power management: %s\n", wificard);
         return;
     }
     
-    int result = execute_command(command);
+    // Execute power save command from lookup table
+    printf("Disabling power saving for %s...\n", config->power_save_description);
+    int result = execute_command(config->power_save_command);
     if (result != 0) {
 #ifdef DEBUG
         printf("Warning: WiFi power save disable command failed with status %d\n", result);
-        printf("Command attempted: %s\n", command);
+        printf("Command attempted: %s\n", config->power_save_command);
 #endif
     } else {
         printf("WiFi power saving DISABLED - Critical for FPV stability\n");
@@ -1814,30 +2351,20 @@ void set_maximum_tx_power(void) {
         return;
     }
     
-    char command[128];
-    int result;
-    
-    if (strcmp(wificard, "8812au") == 0) {
-        // RTL8812AU: Set maximum TX power (typically 30 dBm)
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
-        printf("Setting maximum TX power for RTL8812AU (30 dBm)...\n");
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        // RTL8812EU: Set maximum TX power (typically 30 dBm)
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
-        printf("Setting maximum TX power for RTL8812EU (30 dBm)...\n");
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        // RTL873xBU: Set maximum TX power (typically 20 dBm)
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 20");
-        printf("Setting maximum TX power for RTL873xBU (20 dBm)...\n");
-    } else {
+    // Get WiFi card configuration from lookup table
+    const wifi_card_config_t* config = get_wifi_card_config(wificard);
+    if (!config) {
         printf("ERROR: Unknown WiFi card type for TX power: %s\n", wificard);
         return;
     }
     
-    result = execute_command(command);
+    // Execute maximum TX power command from lookup table
+    printf("Setting maximum TX power for %s...\n", config->power_save_description);
+    int result = execute_command(config->max_tx_power_command);
+    
     if (result != 0) {
         printf("Warning: Failed to set maximum TX power (status %d)\n", result);
-        printf("Command attempted: %s\n", command);
+        printf("Command attempted: %s\n", config->max_tx_power_command);
         printf("This may limit your FPV range\n");
     } else {
         printf("Maximum TX power SET - Optimized for maximum FPV range\n");
@@ -1852,63 +2379,24 @@ void setup_driver_power_management(void) {
         return;
     }
     
-    char command[256];
-    int result;
-    
-    if (strcmp(wificard, "8812au") == 0) {
-        // RTL8812AU: Disable power management via modprobe parameters
-        printf("Setting up RTL8812AU driver power management...\n");
-        
-        // Try to unload and reload with power management disabled
-        snprintf(command, sizeof(command), 
-                "modprobe -r 8812au && modprobe 8812au rtw_power_mgnt=0 rtw_en_autosleep=0");
-        result = execute_command(command);
-        
-        if (result != 0) {
-            printf("Warning: Failed to reload 8812au driver with power management disabled\n");
-            printf("You may need to manually add to /etc/modprobe.d/8812au.conf:\n");
-            printf("options 8812au rtw_power_mgnt=0 rtw_en_autosleep=0\n");
-        } else {
-            printf("RTL8812AU driver reloaded with power management DISABLED\n");
-        }
-        
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        // RTL8812EU: Disable power management via modprobe parameters
-        printf("Setting up RTL8812EU driver power management...\n");
-        
-        // Try to unload and reload with power management disabled
-        snprintf(command, sizeof(command), 
-                "modprobe -r 8812eu && modprobe 8812eu rtw_power_mgnt=0 rtw_en_autosleep=0");
-        result = execute_command(command);
-        
-        if (result != 0) {
-            printf("Warning: Failed to reload 8812eu driver with power management disabled\n");
-            printf("You may need to manually add to /etc/modprobe.d/8812eu.conf:\n");
-            printf("options 8812eu rtw_power_mgnt=0 rtw_en_autosleep=0\n");
-        } else {
-            printf("RTL8812EU driver reloaded with power management DISABLED\n");
-        }
-        
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        // RTL873xBU: Disable power management via modprobe parameters
-        printf("Setting up RTL873xBU driver power management...\n");
-        
-        // Try to unload and reload with power management disabled
-        snprintf(command, sizeof(command), 
-                "modprobe -r 873xbu && modprobe 873xbu rtw_power_mgnt=0 rtw_en_autosleep=0");
-        result = execute_command(command);
-        
-        if (result != 0) {
-            printf("Warning: Failed to reload 873xbu driver with power management disabled\n");
-            printf("You may need to manually add to /etc/modprobe.d/873xbu.conf:\n");
-            printf("options 873xbu rtw_power_mgnt=0 rtw_en_autosleep=0\n");
-        } else {
-            printf("RTL873xBU driver reloaded with power management DISABLED\n");
-        }
-        
-    } else {
+    // Get WiFi card configuration from lookup table
+    const wifi_card_config_t* config = get_wifi_card_config(wificard);
+    if (!config) {
         printf("ERROR: Unknown WiFi card type for driver power management: %s\n", wificard);
         return;
+    }
+    
+    printf("Setting up %s driver power management...\n", config->power_save_description);
+    
+    // Execute driver reload command from lookup table
+    int result = execute_command(config->driver_reload_command);
+        
+        if (result != 0) {
+        printf("Warning: Failed to reload %s driver with power management disabled\n", config->name);
+        printf("You may need to manually add to /etc/modprobe.d/%s.conf:\n", config->name);
+        printf("%s\n", config->modprobe_config_message);
+        } else {
+        printf("%s driver reloaded with power management DISABLED\n", config->name);
     }
 }
 
@@ -1918,26 +2406,17 @@ void enable_pit_mode(void) {
     printf("PIT MODE: ENABLED - Low power standby with HTTP wake-up\n");
     printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
     
-    // Reduce TX power for PIT mode (battery conservation)
-    char command[128];
-    if (strcmp(wificard, "8812au") == 0) {
-        // RTL8812AU: Reduce to 10 dBm for PIT mode (vs 30 dBm max)
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
-        printf("PIT MODE: Reducing TX power for RTL8812AU to 10 dBm (battery conservation)...\n");
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        // RTL8812EU: Reduce to 10 dBm for PIT mode (vs 30 dBm max)
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
-        printf("PIT MODE: Reducing TX power for RTL8812EU to 10 dBm (battery conservation)...\n");
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        // RTL873xBU: Reduce to 5 dBm for PIT mode (vs 20 dBm max)
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 5");
-        printf("PIT MODE: Reducing TX power for RTL873xBU to 5 dBm (battery conservation)...\n");
-    } else {
+    // Get WiFi card configuration from lookup table
+    const wifi_card_config_t* config = get_wifi_card_config(wificard);
+    if (!config) {
         printf("PIT MODE: ERROR - Unknown WiFi card type: %s\n", wificard);
         return;
     }
     
-    int result = execute_command(command);
+    // Execute PIT mode TX power command from lookup table
+    printf("PIT MODE: Reducing TX power for %s (battery conservation)...\n", config->power_save_description);
+    int result = execute_command(config->pit_tx_power_command);
+    
     if (result == 0) {
         printf("PIT MODE: TX power REDUCED for battery conservation\n");
         printf("PIT MODE: System ready for HTTP wake-up calls\n");
@@ -1951,26 +2430,17 @@ void enable_pit_mode(void) {
 void disable_pit_mode(void) {
     printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
     
-    // Restore maximum TX power for full FPV performance
-    char command[128];
-    if (strcmp(wificard, "8812au") == 0) {
-        // RTL8812AU: Restore to maximum 30 dBm
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
-        printf("PIT MODE: Restoring maximum TX power for RTL8812AU to 30 dBm...\n");
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        // RTL8812EU: Restore to maximum 30 dBm
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
-        printf("PIT MODE: Restoring maximum TX power for RTL8812EU to 30 dBm...\n");
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        // RTL873xBU: Restore to maximum 20 dBm
-        snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 20");
-        printf("PIT MODE: Restoring maximum TX power for RTL873xBU to 20 dBm...\n");
-    } else {
+    // Get WiFi card configuration from lookup table
+    const wifi_card_config_t* config = get_wifi_card_config(wificard);
+    if (!config) {
         printf("PIT MODE: ERROR - Unknown WiFi card type: %s\n", wificard);
         return;
     }
     
-    int result = execute_command(command);
+    // Execute maximum TX power command from lookup table
+    printf("PIT MODE: Restoring maximum TX power for %s...\n", config->power_save_description);
+    int result = execute_command(config->max_tx_power_command);
+    
     if (result == 0) {
         printf("PIT MODE: Maximum TX power RESTORED for full FPV performance\n");
         printf("PIT MODE: System ready for full power FPV operation\n");
@@ -2088,38 +2558,13 @@ void toggle_pit_mode(void) {
     // Toggle PIT mode state
     pit_mode_enabled = !pit_mode_enabled;
     
-    // Update function pointer based on new state and WiFi card type
-    if (strcmp(wificard, "8812au") == 0) {
-        if (pit_mode_enabled) {
-            pit_mode_function = pit_mode_enable_8812au;
-            printf("PIT MODE: RTL8812AU ENABLED via toggle\n");
-        } else {
-            pit_mode_function = pit_mode_disable_8812au;
-            printf("PIT MODE: RTL8812AU DISABLED via toggle\n");
-        }
-    } else if (strcmp(wificard, "8812eu2") == 0) {
-        if (pit_mode_enabled) {
-            pit_mode_function = pit_mode_enable_8812eu2;
-            printf("PIT MODE: RTL8812EU ENABLED via toggle\n");
-        } else {
-            pit_mode_function = pit_mode_disable_8812eu2;
-            printf("PIT MODE: RTL8812EU DISABLED via toggle\n");
-        }
-    } else if (strcmp(wificard, "873xbu") == 0) {
-        if (pit_mode_enabled) {
-            pit_mode_function = pit_mode_enable_873xbu;
-            printf("PIT MODE: RTL873xBU ENABLED via toggle\n");
-        } else {
-            pit_mode_function = pit_mode_disable_873xbu;
-            printf("PIT MODE: RTL873xBU DISABLED via toggle\n");
-        }
-    } else {
-        printf("PIT MODE: ERROR - Unknown WiFi card type: %s\n", wificard);
-        return;
-    }
+    // Update function pointer using helper
+    set_pit_mode_function();
     
     // Execute the appropriate function
     pit_mode_function();
+    
+    printf("PIT MODE: %s %s via toggle\n", wificard, pit_mode_enabled ? "ENABLED" : "DISABLED");
 }
 
 // HTTP API endpoint for toggling PIT mode
@@ -2133,38 +2578,13 @@ int toggle_pit_mode_http(void) {
         // Toggle PIT mode state
         pit_mode_enabled = !pit_mode_enabled;
         
-        // Update function pointer based on new state and WiFi card type
-        if (strcmp(wificard, "8812au") == 0) {
-            if (pit_mode_enabled) {
-                pit_mode_function = pit_mode_enable_8812au;
-                printf("HTTP API: PIT MODE RTL8812AU ENABLED via HTTP call\n");
-            } else {
-                pit_mode_function = pit_mode_disable_8812au;
-                printf("HTTP API: PIT MODE RTL8812AU DISABLED via HTTP call\n");
-            }
-        } else if (strcmp(wificard, "8812eu2") == 0) {
-            if (pit_mode_enabled) {
-                pit_mode_function = pit_mode_enable_8812eu2;
-                printf("HTTP API: PIT MODE RTL8812EU ENABLED via HTTP call\n");
-            } else {
-                pit_mode_function = pit_mode_disable_8812eu2;
-                printf("HTTP API: PIT MODE RTL8812EU DISABLED via HTTP call\n");
-            }
-        } else if (strcmp(wificard, "873xbu") == 0) {
-            if (pit_mode_enabled) {
-                pit_mode_function = pit_mode_enable_873xbu;
-                printf("HTTP API: PIT MODE RTL873xBU ENABLED via HTTP call\n");
-            } else {
-                pit_mode_function = pit_mode_disable_873xbu;
-                printf("HTTP API: PIT MODE RTL873xBU DISABLED via HTTP call\n");
-            }
-        } else {
-            printf("HTTP API: PIT MODE ERROR - Unknown WiFi card type: %s\n", wificard);
-            return -1;
-        }
+        // Update function pointer using helper
+        set_pit_mode_function();
         
         // Execute the appropriate function
         pit_mode_function();
+        
+        printf("HTTP API: PIT MODE %s %s via HTTP call\n", wificard, pit_mode_enabled ? "ENABLED" : "DISABLED");
         
 #ifdef DEBUG
         GLOBAL_DEBUG_BUILD(true, "HTTP: PIT mode %s ", pit_mode_enabled ? "ENABLED" : "DISABLED");
@@ -2294,52 +2714,129 @@ static int worker_running = 0;
 // QP Delta configuration removed - ROI is disabled in recent Majestic builds
 // Video quality is now controlled by MCS rate control only
 
-// MCS to RSSI threshold lookup table (based on 802.11n/ac standards)
-// Values are minimum RSSI thresholds for reliable operation at each MCS
-static const int mcs_rssi_thresholds[] = {
-    -82,  // MCS 0 (BPSK 1/2)   - Most robust
-    -79,  // MCS 1 (QPSK 1/2)
-    -77,  // MCS 2 (QPSK 3/4)
-    -74,  // MCS 3 (16-QAM 1/2)
-    -70,  // MCS 4 (16-QAM 3/4)
-    -66,  // MCS 5 (64-QAM 2/3)
-    -65,  // MCS 6 (64-QAM 3/4)
-    -64,  // MCS 7 (64-QAM 5/6)
-    -59,  // MCS 8 (256-QAM 3/4) - VHT
-    -57   // MCS 9 (256-QAM 5/6) - VHT, least robust
-};
 
-// Calculate dynamic RSSI threshold based on current MCS
+// Calculate dynamic RSSI threshold based on current MCS - Uses lookup table for performance
 int get_dynamic_rssi_threshold(int current_mcs) {
-    // Clamp MCS to valid range
+    // Use lookup table for performance
+    if (current_mcs >= 0 && current_mcs < 10) {
+        return rssi_threshold_lookup_table[current_mcs];
+    }
+    
+    // Clamp MCS to valid range and use lookup table
     if (current_mcs < 0) current_mcs = 0;
     if (current_mcs >= 10) current_mcs = 9;
     
-    // Get base threshold from lookup table
-    int base_threshold = mcs_rssi_thresholds[current_mcs];
-    
-    // Apply hardware-specific offset
-    int dynamic_threshold = base_threshold + hardware_rssi_offset;
-    
-    // Apply hardware-specific MCS offset (set during initialization)
-    dynamic_threshold += hardware_mcs_offset;
-    
-    // Add safety margin (3 dBm) for emergency drop
-    dynamic_threshold += SAFETY_MARGIN_DBM;
-    
-    return dynamic_threshold;
+    return rssi_threshold_lookup_table[current_mcs];
 }
 
-// Convert bitrate to approximate MCS (simplified mapping)
+// Convert bitrate to approximate MCS - Uses lookup table for performance
 int bitrate_to_mcs(int bitrate_mbps) {
-    // Simplified mapping based on typical bitrates
-    // This should be calibrated for your specific hardware
+    // Use lookup table for performance
+    if (bitrate_mbps >= 0 && bitrate_mbps <= 1000) {
+        return bitrate_to_mcs_lookup_table[bitrate_mbps];
+    }
+    
+    // Fallback for out-of-range values
+    if (bitrate_mbps <= 0) return 0;
+    if (bitrate_mbps > 1000) return 9;
+    
+    // Mapping based on actual MCS data rates for 20MHz
     for (int i = 0; i < 10; i++) {
         if (bitrate_mbps <= BITRATE_MCS_THRESHOLDS[i]) {
             return i;
         }
     }
     return 9; // MCS 9 (highest)
+}
+
+// =============================================================================
+// PURE FUNCTIONS - No side effects, same input = same output
+// =============================================================================
+
+// Pure function versions for better testability and optimization
+int bitrate_to_mcs_pure(int bitrate_mbps, const double* thresholds) {
+    for (int i = 0; i < 10; i++) {
+        if (bitrate_mbps <= thresholds[i]) {
+            return i;
+        }
+    }
+    return 9; // MCS 9 (highest)
+}
+
+int get_dynamic_rssi_threshold_pure(int current_mcs, 
+                                   const int* mcs_thresholds,
+                                   int hardware_rssi_offset,
+                                   int hardware_mcs_offset) {
+    // Clamp MCS to valid range
+    if (current_mcs < 0) current_mcs = 0;
+    if (current_mcs >= 10) current_mcs = 9;
+    
+    // Get base threshold from lookup table
+    int base_threshold = mcs_thresholds[current_mcs];
+    
+    // Apply hardware-specific offset
+    int dynamic_threshold = base_threshold + hardware_rssi_offset;
+    
+    // Apply hardware-specific MCS offset
+    dynamic_threshold += hardware_mcs_offset;
+    
+    // Add safety margin (3 dBm) for emergency drop
+    return dynamic_threshold + 3;
+}
+
+// Pure VLQ calculation (no side effects)
+double calculate_vlq_pure(int filtered_dbm, int dbm_min, int dbm_max, int filtered_rssi) {
+    if (filtered_dbm < -100 || filtered_dbm > 0) {
+        // Invalid dBm reading, use RSSI fallback
+        return (filtered_rssi > 0) ? filtered_rssi : 0.0;
+    }
+    
+    if (dbm_max == dbm_min) {
+        // Fallback: use RSSI-based calculation
+        return (filtered_rssi > 0) ? filtered_rssi : 0.0;
+    }
+    
+    // Calculate VLQ using precomputed range inverse
+    double dbm_range_inv = 100.0 / (double)(dbm_max - dbm_min);
+    return (filtered_dbm - dbm_min) * dbm_range_inv;
+}
+
+// Pure bitrate calculation
+int calculate_target_bitrate_pure(double vlq, int bitrate_max) {
+    return (int)(vlq * bitrate_max / 100.0);
+}
+
+// Pure exposure calculation
+int calculate_exposure_pure(int fps) {
+    if (fps <= 0) return 8;
+    
+    float frame_period_ms = 1000.0f / fps;
+    float exposure_ms = frame_period_ms / 2.0f;
+    
+    int exposure = (int)(exposure_ms + 0.5f);
+    return (exposure < 1) ? 1 : exposure;
+}
+
+
+// Pure MCS command selection - Uses lookup table for performance
+int get_mcs_command_pure(int mcs_index, const char* wificard_type) {
+    // Use lookup table for performance
+    if (mcs_index >= 0 && mcs_index < 16) {
+        return mcs_command_lookup_table[mcs_index];
+    }
+    
+    return 0xFF;  // Auto rate adaptation
+}
+
+// Initialize worker thread (call once at startup)
+void init_worker_thread() {
+    sem_init(&worker_sem, 0, 0);
+    worker_running = 1;
+    if (pthread_create(&worker_thread, NULL, worker_thread_func, NULL) != 0) {
+        perror("Failed to create worker thread");
+        exit(1);
+    }
+    printf("Worker thread: Initialized and started\n");
 }
 
 // Worker thread that processes API calls
@@ -2367,21 +2864,15 @@ void *worker_thread_func(void *arg) {
                 int bitrateMcs = data->bitrateMcs;
                 char *mcspath = data->mcspath;
                 
-                // Hardware-specific MCS rate control (using pre-set constants)
-                if (bitrateMcs >= 1 && bitrateMcs < 3) {
-                    snprintf(cmd, sizeof(cmd), "echo 0x%02x > %s/rate_ctl", hardware_mcs_low_cmd, mcspath);
-                } else if (bitrateMcs >= 3 && bitrateMcs < 10) {
-                    snprintf(cmd, sizeof(cmd), "echo 0x%02x > %s/rate_ctl", hardware_mcs_medium_cmd, mcspath);
-                } else {
-                    snprintf(cmd, sizeof(cmd), "echo 0x%02x > %s/rate_ctl", hardware_mcs_high_cmd, mcspath);
-                }
+                // Hardware-specific MCS rate control (using proper Realtek MCS encoding)
+                int mcs_command = get_mcs_command_pure(bitrateMcs, wificard);
+                snprintf(cmd, sizeof(cmd), "echo 0x%02x > %s/rate_ctl", mcs_command, mcspath);
                 
-                int result = execute_command(cmd);
-                if (result != 0) {
+                    int result = execute_command(cmd);
+                    if (result != 0) {
 #ifdef DEBUG
                     printf("Warning: MCS rate control (MCS=%d, cmd=0x%02x) command failed with status %d\n", 
-                           bitrateMcs, (bitrateMcs >= 1 && bitrateMcs < 3) ? hardware_mcs_low_cmd :
-                           (bitrateMcs >= 3 && bitrateMcs < 10) ? hardware_mcs_medium_cmd : hardware_mcs_high_cmd, result);
+                           bitrateMcs, mcs_command, result);
 #endif
                 } else {
 #ifdef DEBUG
@@ -2403,7 +2894,9 @@ void set_mcs_async(int bitrateMcs, const char *mcspath) {
     pthread_mutex_lock(&worker_mutex);
     pending_cmd.type = CMD_SET_MCS;
     pending_cmd.data.mcs_data.bitrateMcs = bitrateMcs;
-    snprintf(pending_cmd.data.mcs_data.mcspath, sizeof(pending_cmd.data.mcs_data.mcspath), "%s", mcspath);
+    // Safe string copy with bounds checking
+    strncpy(pending_cmd.data.mcs_data.mcspath, mcspath, sizeof(pending_cmd.data.mcs_data.mcspath) - 1);
+    pending_cmd.data.mcs_data.mcspath[sizeof(pending_cmd.data.mcs_data.mcspath) - 1] = '\0';
     pthread_mutex_unlock(&worker_mutex);
     
     sem_post(&worker_sem);
@@ -2612,48 +3105,13 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
 }
 
 
-int get_dbm() {
-    int dbm = -100;
-    FILE *fp = fopen("/proc/net/wireless", "r");
-    if (fp == NULL) {
-#ifdef DEBUG
-        perror("Failed to open /proc/net/wireless");
-#endif
-        return dbm;
+// Optimized dBm reading wrapper - uses function pointer for performance
+int get_dbm(const char *readcmd) {
+    if (dbm_read_function == NULL) {
+        printf("ERROR: dBm read function not initialized! Call init_rssi_read_method() first.\n");
+        return -100;
     }
-    
-    char line[256];
-    int line_count = 0;
-    
-    // Read lines
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        line_count++;
-        
-        // Skip header lines
-        if (line_count <= 2) {
-            continue;
-        }
-        
-        // Look for wlan0 line
-        if (strstr(line, "wlan0:") != NULL) {
-            // Parse fields: "wlan0: status link level noise nwid crypt frag retry misc"
-            // Format: "wlan0: 0000   1234  -45.  -95   0     0     0    0    0"
-            char interface[32];
-            int status, link;
-            float level;  // Signal level in dBm
-            
-            if (sscanf(line, "%s %x %d %f", interface, &status, &link, &level) >= 4) {
-                dbm = (int)level;
-#ifdef DEBUG
-                GLOBAL_DEBUG_BUILD(true, "DEBUG: Read dBm from /proc/net/wireless: %d ", dbm);
-#endif
-            }
-            break;
-        }
-    }
-    
-    fclose(fp);
-    return dbm;
+    return dbm_read_function(readcmd);
 }
 
 
@@ -2892,6 +3350,124 @@ int get_rssi(const char *readcmd) {
     return rssi_read_function(readcmd);
 }
 
+// =============================================================================
+// OPTIMIZED dBm READING FUNCTIONS (File Rewind and Memory Mapping)
+// =============================================================================
+
+// File read with rewind approach for dBm
+int get_dbm_file_rewind(const char *readcmd) {
+    static FILE *fp = NULL;
+    static char last_path[512] = {0};
+    char buffer[256];
+    int dbm = -100;
+    char path[512];
+
+    // Build the full path to sta_tp_info
+    strcpy(path, readcmd);
+    strcat(path, "/sta_tp_info");
+
+    // Only reopen if path changed or file not open
+    if (fp == NULL || strcmp(path, last_path) != 0) {
+        if (fp != NULL) {
+            fclose(fp);
+        }
+        fp = fopen(path, "r");
+        if (!fp) {
+#ifdef DEBUG
+            perror("fopen");
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to open sta_tp_info file for dBm: %s ", path);
+#endif
+            return -100;  // Return error code
+        }
+        strcpy(last_path, path);
+    } else {
+        // Rewind to beginning for fresh read
+        rewind(fp);
+    }
+
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        // Use driver-specific dBm format parser
+        dbm = dbm_format_parser(buffer);
+        if (dbm != -100 && dbm != -1) {  // Valid dBm value found
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Found dBm via file rewind: %d dBm ", dbm);
+#endif
+            return dbm;
+        }
+    }
+
+    return dbm;
+}
+
+// Memory mapped approach for dBm
+int get_dbm_mmap(const char *readcmd) {
+    static char *mapped_data = NULL;
+    static size_t mapped_size = 0;
+    static char last_path[512] = {0};
+    char path[512];
+    int dbm = -100;
+    
+    // Direct string concatenation - much faster than snprintf
+    strcpy(path, readcmd);
+    strcat(path, "/sta_tp_info");
+    
+    // Only remap if path changed
+    if (strcmp(path, last_path) != 0) {
+        if (mapped_data != NULL) {
+            munmap(mapped_data, mapped_size);
+            mapped_data = NULL;
+        }
+        
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            perror("open");
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to open sta_tp_info file for dBm: %s ", path);
+#endif
+            return -100;  // Return error code
+        }
+        
+        struct stat st;
+        if (fstat(fd, &st) < 0) {
+            perror("fstat");
+            close(fd);
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to stat sta_tp_info file for dBm: %s ", path);
+#endif
+            return -100;  // Return error code
+        }
+        
+        mapped_size = st.st_size;
+        mapped_data = mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        
+        if (mapped_data == MAP_FAILED) {
+            perror("mmap");
+            mapped_data = NULL;
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: Failed to mmap sta_tp_info file for dBm: %s ", path);
+#endif
+            return -100;  // Return error code
+        }
+        
+        strcpy(last_path, path);
+    }
+    
+    if (mapped_data == NULL) {
+        return dbm;
+    }
+    
+    // Use driver-specific dBm format parser
+    dbm = dbm_format_parser(mapped_data);
+    if (dbm != -100 && dbm != -1) {  // Valid dBm value found
+#ifdef DEBUG
+        GLOBAL_DEBUG_BUILD(true, "DEBUG: Found dBm via mmap: %d dBm ", dbm);
+#endif
+    }
+    
+    return dbm;
+}
+
 
 
 
@@ -2923,42 +3499,37 @@ void set_bitrate_async(int bitrate_mbps) {
     sem_post(&worker_sem);
 }
 
+// Precompute constants for hot path optimization
+void precompute_constants() {
+    // Precompute VLQ calculation constants for all possible dbm_Min values
+    dbm_range_inv_high = PERCENTAGE_CONVERSION / (double)(DEFAULT_DBM_MAX - DBM_THRESHOLD_HIGH);
+    dbm_range_inv_medium = PERCENTAGE_CONVERSION / (double)(DEFAULT_DBM_MAX - DBM_THRESHOLD_MEDIUM);
+    dbm_range_inv_low = PERCENTAGE_CONVERSION / (double)(DEFAULT_DBM_MAX - DBM_THRESHOLD_LOW);
+    dbm_range_inv_fallback = PERCENTAGE_CONVERSION / (double)(DEFAULT_DBM_MAX - (DEFAULT_DBM_MAX - MIN_DBM_DIFFERENCE));
+    
+    // Precompute bitrate calculation constants  
+    bitrate_scale = bitrate_max / PERCENTAGE_CONVERSION;
+    
+    // Precompute signal sampling interval
+    signal_sampling_interval_ns = NS_PER_SEC / signal_sampling_freq_hz;
+    
+    // Precompute derived values for configuration display
+    signal_sampling_freq_hz_display = (float)fps / signal_sampling_interval;
+    emergency_cooldown_frames_display = (float)emergency_cooldown_ms * fps / 1000.0f;
+    
+    printf("Precomputed constants:\n");
+    printf("  dBm range inverse (high): %.6f\n", dbm_range_inv_high);
+    printf("  dBm range inverse (medium): %.6f\n", dbm_range_inv_medium);
+    printf("  dBm range inverse (low): %.6f\n", dbm_range_inv_low);
+    printf("  dBm range inverse (fallback): %.6f\n", dbm_range_inv_fallback);
+    printf("  Bitrate scale: %.6f\n", bitrate_scale);
+    printf("  Signal sampling interval: %ld ns\n", signal_sampling_interval_ns);
+}
+
 int main(int argc, char *argv[]) {
-    
-    int bitrate = DEFAULT_BITRATE;
-    int bitrate_min = DEFAULT_BITRATE_MIN;
-    // Use global bitrate_max instead of local variable
-    // bitrate_max is loaded from config file
-    int rssi = 0;
-    char NIC[16] = {0};
-    strcpy(NIC, wificard);  // Initialize with static wificard variable
-    char driverpath[256] = {0};
-    int RaceMode = 0;
-    int histeris = DEFAULT_HYSTERESIS;      // Reduced hysteresis for faster racing response
-    int minushisteris = DEFAULT_MINUS_HYSTERESIS; // Reduced hysteresis for faster racing response
-    int aDb = 0;
-    int currentDb = 0;
-    int dbm = DEFAULT_INITIAL_DBM;
-    int loop_counter = 0;  // Counter to reduce I/O frequency
-    int target_fps = DEFAULT_TARGET_FPS;  // Default racing frame rate
-    
-    // Kalman filter parameters - using static variables
-    float rssi_process_var = kalman_rssi_process;
-    float rssi_measure_var = kalman_rssi_measure;
-    float dbm_process_var = kalman_dbm_process;
-    float dbm_measure_var = kalman_dbm_measure;
-
-    RaceMode = race_mode;
-    target_fps = fps;
-
-    // Filtered values
-    float filtered_rssi = DEFAULT_RSSI_ESTIMATE;
-    float filtered_dbm = DEFAULT_DBM_ESTIMATE;
-    
-  
-
-    config("/etc/ap_alink.conf", &bitrate_max, NIC, &RaceMode, &target_fps,
-           &rssi_process_var, &rssi_measure_var, &dbm_process_var, &dbm_measure_var,
+    // Load configuration FIRST - before any config values are used
+    config("/etc/ap_alink.conf", &bitrate_max, wificard, &race_mode, &fps,
+           &kalman_rssi_process, &kalman_rssi_measure, &kalman_dbm_process, &kalman_dbm_measure,
            &strict_cooldown_ms, &up_cooldown_ms, &min_change_percent,
            &emergency_rssi_threshold, &emergency_bitrate,
            &pid_kp, &pid_ki, &pid_kd,
@@ -2969,45 +3540,35 @@ int main(int argc, char *argv[]) {
            &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
            &signal_sampling_freq_hz, &hardware_rssi_offset, &cooldown_enabled, &enable_maximum_tx_power, &auto_exposure_enabled);
     
-    // Set and configure filter chains based on race_mode
-    if (race_mode) {
-        // Racing mode - only initialize racing filters
-        set_filter_chain(racing_rssi_filter_chain_config, &rssi_race_filter_chain);
-        set_filter_chain(racing_dbm_filter_chain_config, &dbm_race_filter_chain);
-        active_rssi_filter_chain = &rssi_race_filter_chain;
-        active_dbm_filter_chain = &dbm_race_filter_chain;
-        printf("Racing mode ENABLED - Using low-pass filters for fast response\n");
-    } else {
-        // Normal mode - only initialize normal filters
-        set_filter_chain(rssi_filter_chain_config, &rssi_filter_chain);
-        set_filter_chain(dbm_filter_chain_config, &dbm_filter_chain);
-        active_rssi_filter_chain = &rssi_filter_chain;
-        active_dbm_filter_chain = &dbm_filter_chain;
-        printf("Normal mode ENABLED - Using Kalman filters for stability\n");
-    }
+    // Only declare truly local variables for the main loop
+    int rssi = 0;
+    int aDb = 0;
+    int currentDb = 0;
+    int dbm = DEFAULT_INITIAL_DBM;
+    int loop_counter = 0;  // Counter to reduce I/O frequency
+    
+    // Runtime state variables (not config)
+    int bitrate = DEFAULT_BITRATE;
+    int bitrate_min = DEFAULT_BITRATE_MIN;
+    int histeris = DEFAULT_HYSTERESIS;      // Reduced hysteresis for faster racing response
+    int minushisteris = DEFAULT_MINUS_HYSTERESIS; // Reduced hysteresis for faster racing response
+    
+    // Filtered values (these are runtime state, not config)
+    float filtered_rssi = DEFAULT_RSSI_ESTIMATE;
+    float filtered_dbm = DEFAULT_DBM_ESTIMATE;
+    
+    // Precompute constants for hot path optimization
+    precompute_constants();
+    
+    // Initialize driver path AFTER config is loaded
+    wifi_card_init(wificard, driverpath);
+    
     
     // Initialize filters with config values
-    init_filters(rssi_process_var, rssi_measure_var, dbm_process_var, dbm_measure_var,
+    init_filters(kalman_rssi_process, kalman_rssi_measure, kalman_dbm_process, kalman_dbm_measure,
                  lpf_cutoff_freq, lpf_sample_freq);
     
-    // Initialize PID controller with config values
-    pid_init(&bitrate_pid, pid_kp, pid_ki, pid_kd);
-    printf("PID Controller initialized: Kp=%.2f, Ki=%.2f, Kd=%.2f\n", pid_kp, pid_ki, pid_kd);
-    
-    // Setup driver-level power management (additional protection)
-    setup_driver_power_management();
-    
-    // Initialize PIT mode based on configuration
-    if (pit_mode_enabled) {
-        printf("PIT MODE: Initializing low power standby mode\n");
-        pit_mode_function();  // Use function pointer
-    } else {
-        printf("PIT MODE: Full power FPV mode active\n");
-        pit_mode_function();  // Use function pointer
-    }
-    
-    // Print WiFi power management configuration
-    printf("WiFi power saving: %s\n", disable_wifi_power_save ? "DISABLED (recommended for FPV)" : "ENABLED (not recommended for FPV)");
+
     
     // Initialize WiFi card with all configurations
     if (!wifi_card_init(wificard, driverpath)) {
@@ -3016,26 +3577,17 @@ int main(int argc, char *argv[]) {
     
     // Print signal sampling configuration
     printf("Signal sampling interval: %d frames (%.1fHz at %d FPS)\n", 
-           signal_sampling_interval, (float)target_fps / signal_sampling_interval, target_fps);
+           signal_sampling_interval, signal_sampling_freq_hz_display, fps);
     
     // Print emergency cooldown configuration
     printf("Emergency cooldown: %lums (%.1f frames at %d FPS)\n", 
-           emergency_cooldown_ms, (float)emergency_cooldown_ms * target_fps / 1000.0, target_fps);
+           emergency_cooldown_ms, emergency_cooldown_frames_display, fps);
     
-    // Control algorithm configuration printed by init_control_algorithm()
-    
-    // Print RSSI reading method optimization status
-    if (use_file_rewind_method) {
-        printf("RSSI reading optimization: File rewind with persistent handle\n");
-    } else {
-        printf("RSSI reading optimization: Memory mapping (mmap)\n");
-    }
     
     // Set real-time priority for ultra-high performance racing VTX
     set_realtime_priority();
     
     // Initialize signal sampling timing (independent of frame rate)
-    long signal_sampling_interval_ns = 1000000000L / signal_sampling_freq_hz;  // Convert Hz to nanoseconds
     struct timespec last_signal_time = {0, 0};
     clock_gettime(CLOCK_MONOTONIC, &last_signal_time);
     
@@ -3050,7 +3602,7 @@ int main(int argc, char *argv[]) {
     } else {
         printf("Cooldown system: DISABLED (immediate bitrate changes)\n");
     }
-
+    
     
     // Initialize pre-calculated sleep values for performance
     init_sleep_values();
@@ -3064,128 +3616,50 @@ int main(int argc, char *argv[]) {
     // Initialize PIT mode function pointer for performance
     init_pit_mode();
     
+    // Initialize performance lookup tables for optimization
+    init_performance_lookup_tables();
+    
+    
     // Initialize debug output function pointer for performance
     init_debug_output();
     
     // Initialize cooldown check function pointer for performance
     init_cooldown_check();
     
-    // Print sleep configuration
-    printf("Sleep configuration:\n");
-    printf("  Mode: %s\n", sleep_config.smart_sleep_enabled ? "Smart (adaptive)" : "Simple (fixed)");
-    printf("  Base loop: %uus\n", sleep_config.main_loop_us);
-    printf("  Sleep value: %uus (%.1fms)\n", sleep_value_us, sleep_value_us / 1000.0);
-    printf("  Error conditions: %ums\n", sleep_config.error_condition_ms);
-    
     // Initialize worker thread
-    sem_init(&worker_sem, 0, 0);
-    worker_running = 1;
-    if (pthread_create(&worker_thread, NULL, worker_thread_func, NULL) != 0) {
-        perror("Failed to create worker thread");
-        exit(1);
-    }
+    init_worker_thread();
     
-    // Startup complete - beginning adaptive link control immediately
-    printf("Startup complete - beginning adaptive link control\n");
+    // Initialize counter-based sampling for optimized signal sampling
+    init_counter_sampling();
     
-    if (RaceMode != 1 && RaceMode != 0) {
-        printf("invalid value for racemode\n");
-    } else if (RaceMode == 1) {
-       
-        printf("RACEMODE ENABLE\n");
-        char cmd1[512];
-        snprintf(cmd1, sizeof(cmd1), "echo 20 > %s/ack_timeout", driverpath);
-        int ack_result = execute_command(cmd1);
-        if (ack_result != 0) {
-#ifdef DEBUG
-            printf("Warning: Failed to set ack_timeout\n");
-#endif
-        }
-        //SET BITRATE MAX 4MBPS
-        bitrate_max=4;
-        //SET BUFFER SETTING
-        int result1 = execute_command("sysctl -w net.core.rmem_default=16384");
-        int result2 = execute_command("sysctl -w net.core.rmem_max=65536");
-        int result3 = execute_command("sysctl -w net.core.wmem_default=16384");
-        int result4 = execute_command("sysctl -w net.core.wmem_max=65536");
-        int result5 = execute_command("ifconfig wlan0 txqueuelen 100");
-        int result6 = execute_command("sysctl -w net.core.netdev_max_backlog=64");
-        
-        // Check if any network configuration commands failed
-        if (result1 != 0 || result2 != 0 || result3 != 0 || result4 != 0 || result5 != 0 || result6 != 0) {
-#ifdef DEBUG
-            printf("Warning: Some network buffer configuration commands failed\n");
-#endif
-        }
-        //SET racing video configuration with optimized HTTP calls
-        char video_config[256];
-        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.size=%s", racing_video_resolution);
-        http_get(video_config);
-        
-        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.fps=%d", racing_fps);
-        http_get(video_config);
-        
-        // Calculate optimal exposure based on frame rate (180° shutter rule)
-        int calculated_exposure = auto_exposure_enabled ? calculate_racing_exposure() : racing_exposure;
-        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", calculated_exposure);
-        http_get(video_config);
-        
-        if (auto_exposure_enabled) {
-            printf("Racing mode: Auto-calculated exposure %dms for %dfps (180° shutter guideline)\n", 
-                   calculated_exposure, racing_fps);
-            printf("NOTE: CMOS cameras can set exposure independently with rolling shutter- adjust manually if needed\n");
-        }                
-        
-    } else {
-        printf("Normal mode ENABLED\n");
-        
-        // Set normal mode video configuration
-        char video_config[256];
-        snprintf(video_config, sizeof(video_config), "/api/v1/set?video0.fps=%d", fps);
-        http_get(video_config);
-        
-        // Calculate optimal exposure based on frame rate (180° shutter rule)
-        int calculated_exposure = auto_exposure_enabled ? calculate_normal_exposure() : 8; // Default fallback
-        snprintf(video_config, sizeof(video_config), "/api/v1/set?isp.exposure=%d", calculated_exposure);
-        http_get(video_config);
-        
-        if (auto_exposure_enabled) {
-            printf("Normal mode: Auto-calculated exposure %dms for %dfps (180° shutter guideline)\n", 
-                   calculated_exposure, fps);
-            printf("NOTE: CMOS cameras can set exposure independently with rolling shutter - adjust manually if needed\n");
-        }
-    }
+    // Initialize race mode configuration
+    init_race_mode();
+    
+    // Initialize HTTP system and video configuration
+    init_http_system();
     
     // Enable global debug system after initialization is complete
     enable_global_debug();
     
+    // Startup complete - beginning adaptive link control immediately
+    printf("Startup complete - beginning adaptive link control\n");
     while (1) {
         // Main control loop - efficient sleep management
         bool work_done_this_iteration = false;
         
         loop_counter++;
         
-        // Independent signal sampling timing (not tied to frame rate)
-        // This allows for higher frequency signal sampling than frame rate
-        struct timespec current_signal_time;
-        clock_gettime(CLOCK_MONOTONIC, &current_signal_time);
-        
-        long signal_elapsed_ns = (current_signal_time.tv_sec - last_signal_time.tv_sec) * 1000000000L + 
-                                 (current_signal_time.tv_nsec - last_signal_time.tv_nsec);
-        
-#ifdef DEBUG
-        bool new_signal_data = false;  // Flag for debug output
-#endif
-        if (signal_elapsed_ns >= signal_sampling_interval_ns) {
+        // Counter-based signal sampling (not tied to frame rate)
+        // This allows for higher frequency signal sampling than frame rate with ZERO CPU overhead
+        if (should_sample_signal_counter()) {
             work_done_this_iteration = true; // We're doing signal processing
-            // Time to sample signal - update timing
-            last_signal_time = current_signal_time;
+            new_signal_data_available = true;
             
             // Read signal data
             currentDb = dbm - aDb;
             
-            // Try to get dBm from /proc/net/wireless first
-            dbm = get_dbm();
+            // Try to get dBm from optimized reading method first
+            dbm = get_dbm(driverpath);
             
             // If that fails or returns invalid value, try sta_tp_info
             if (dbm == -100 || dbm == 0) {
@@ -3218,9 +3692,14 @@ int main(int argc, char *argv[]) {
             check_emergency_drop(last_bitrate, filtered_rssi, emergency_rssi_threshold, emergency_bitrate);
             
 #ifdef DEBUG
-            // Flag that we have new signal data for debug output
-            new_signal_data = true;
+            // Signal data processed - debug flag handled by new_signal_data_available
 #endif
+        }
+        
+        // Process signal data if available (hardware clock optimized)
+        if (new_signal_data_available) {
+            new_signal_data_available = false;
+            // Signal data already processed above, just clear the flag
         }
         
         //calculation of dbm_Max dbm_Min
@@ -3232,18 +3711,30 @@ int main(int argc, char *argv[]) {
             dbm_Min = DEFAULT_DBM_MAX - MIN_DBM_DIFFERENCE;  // Force at least 1dB difference
         }
 
-        // Calculate VLQ with bounds checking
+        // Calculate VLQ with bounds checking (optimized with precomputed constants)
         double vlq;
         if (DEFAULT_DBM_MAX == dbm_Min) {
             // Fallback: if somehow they're still equal, use RSSI-based calculation
-            vlq = (filtered_rssi > 0) ? ((double)filtered_rssi / PERCENTAGE_CONVERSION) * PERCENTAGE_CONVERSION : 0.0;
+            vlq = (filtered_rssi > 0) ? filtered_rssi : 0.0;  // Optimized: no division needed
         } else {
             // Additional safety check for invalid dBm values
             if (filtered_dbm < -100 || filtered_dbm > 0) {
                 // Invalid dBm reading, use RSSI fallback
-                vlq = (filtered_rssi > 0) ? ((double)filtered_rssi / PERCENTAGE_CONVERSION) * PERCENTAGE_CONVERSION : 0.0;
+                vlq = (filtered_rssi > 0) ? filtered_rssi : 0.0;  // Optimized: no division needed
             } else {
-                vlq = ((double)((filtered_dbm) - (dbm_Min)) / (double)((DEFAULT_DBM_MAX) - (dbm_Min))) * PERCENTAGE_CONVERSION;
+                // Optimized VLQ calculation using precomputed range inverses
+                double dbm_range_inv_current;
+                if (dbm_Min == DBM_THRESHOLD_HIGH) {
+                    dbm_range_inv_current = dbm_range_inv_high;
+                } else if (dbm_Min == DBM_THRESHOLD_MEDIUM) {
+                    dbm_range_inv_current = dbm_range_inv_medium;
+                } else if (dbm_Min == DBM_THRESHOLD_LOW) {
+                    dbm_range_inv_current = dbm_range_inv_low;
+                } else {
+                    // Fallback case (DEFAULT_DBM_MAX - MIN_DBM_DIFFERENCE)
+                    dbm_range_inv_current = dbm_range_inv_fallback;
+                }
+                vlq = (filtered_dbm - dbm_Min) * dbm_range_inv_current;
             }
         }
 
@@ -3253,7 +3744,7 @@ int main(int argc, char *argv[]) {
       
 #ifdef DEBUG
         // Global debug logging - build single string per loop
-        if (new_signal_data && GLOBAL_DEBUG_THROTTLE(10)) {  // Show every 10th sample
+        if (new_signal_data_available && GLOBAL_DEBUG_THROTTLE(10)) {  // Show every 10th sample
             GLOBAL_DEBUG_RESET();
             GLOBAL_DEBUG_APPEND("Signal: RSSI=%d(%.1f) dBm=%d(%.1f) VLQ=%.2f%% ", 
                         rssi, filtered_rssi, dbm, filtered_dbm, vlq);
@@ -3262,12 +3753,6 @@ int main(int argc, char *argv[]) {
         }
 #endif
         mspLQ((int)filtered_rssi);
-
-             
-        
-        //MAIN LOGIC
-
-        // Emergency stop if RSSI is zero (driver issue)
         if (rssi == 0) {
 #ifdef DEBUG
             printf("ERROR: RSSI is zero - driver path issue detected!\n");
@@ -3275,7 +3760,7 @@ int main(int argc, char *argv[]) {
             printf("Please check WiFi card configuration and driver paths\n");
             printf("System will continue but bitrate changes are disabled\n");
 #endif
-            unified_sleep(true, false); // Error condition sleep
+            main_loop_sleep(true, false); // Error condition sleep
             continue;
         }
 
@@ -3284,7 +3769,7 @@ int main(int argc, char *argv[]) {
 #ifdef DEBUG
             printf("WiFi driver not available - skipping bitrate control\n");
 #endif
-            unified_sleep(true, false); // Error condition sleep
+            main_loop_sleep(true, false); // Error condition sleep
             continue;
         }
 
@@ -3298,16 +3783,16 @@ int main(int argc, char *argv[]) {
                 bitrate = bitrate_min;
             }
              else {
-                // Calculate target bitrate using VLQ
-                int target_bitrate = (int)(bitrate_max * vlq / PERCENTAGE_CONVERSION);
+                // Calculate target bitrate using VLQ (optimized with precomputed constants)
+                int target_bitrate = (int)(vlq * bitrate_scale);
                 
                 // Use function pointer for control algorithm (no runtime conditionals)
                 bitrate = control_algorithm_function(target_bitrate, last_bitrate, &bitrate_pid);
-                
+                    
 #ifdef DEBUG
-                if (new_signal_data) {
+                    if (new_signal_data_available) {
                     debug_output_function(target_bitrate, last_bitrate, bitrate);
-                }
+                    }
 #endif
                 
                 // Clamp bitrate to valid range
@@ -3316,22 +3801,15 @@ int main(int argc, char *argv[]) {
             }
             }
 
-            // Apply cooldown logic before changing bitrate (optimized - no runtime conditionals)
+            
+            // Apply cooldown logic and handle bitrate changes (optimized - no runtime conditionals)
             if (cooldown_check_function(bitrate, last_bitrate, strict_cooldown_ms, up_cooldown_ms, min_change_percent, emergency_cooldown_ms)) {
                 set_bitrate_async(bitrate);
                 set_mcs_async(bitrate, driverpath);
                 
-                // Update timing variables
-                unsigned long now = get_current_time_ms();
-                last_change_time = now;
-                if (bitrate > last_bitrate) {
-                    last_up_time = now;
-                }
-                last_bitrate = bitrate;
-                
 #ifdef DEBUG
                 GLOBAL_DEBUG_BUILD(true, "Bitrate: %d kbps (RSSI: %.1f, dBm: %.1f) ", 
-                           bitrate, filtered_rssi, filtered_dbm);
+                       bitrate, filtered_rssi, filtered_dbm);
 #endif
             } else {
 #ifdef DEBUG
@@ -3339,14 +3817,13 @@ int main(int argc, char *argv[]) {
 #endif
             }
                 
+        // Main loop sleep - simple or smart based on config
+        main_loop_sleep(false, work_done_this_iteration);
+                
 #ifdef DEBUG
-        // Flush any remaining debug data
+        // Flush any remaining debug data at the end of each loop iteration
         GLOBAL_DEBUG_FLUSH();
-        fflush(stdout);
 #endif
-        
-        // Unified sleep - simple or smart based on config
-        unified_sleep(false, work_done_this_iteration);
     }
     
     // Cleanup worker thread
