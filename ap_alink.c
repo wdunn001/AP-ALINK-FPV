@@ -181,6 +181,7 @@ static const long NS_PER_SEC = 1000000000L;   // Nanoseconds per second constant
 
 // Counter-based sampling optimization variables
 static unsigned long sample_counter = 0;      // Simple counter for signal sampling
+static unsigned long samples_per_loop = 0;    // Precomputed: 1000 / signal_sampling_freq_hz
 static bool new_signal_data_available = false; // Flag for new signal data
 
 // Precomputed derived values for configuration display
@@ -960,7 +961,7 @@ void init_cooldown_check() {
 // Counter-based sampling optimization functions
 bool should_sample_signal_counter(void) {
     // Simple counter instead of expensive time calculations
-    if (++sample_counter >= (1000 / signal_sampling_freq_hz)) {  // 1000Hz main loop / signal freq
+    if (++sample_counter >= samples_per_loop) {  // Precomputed: 1000 / signal_sampling_freq_hz
         sample_counter = 0;
         return true;
     }
@@ -969,8 +970,9 @@ bool should_sample_signal_counter(void) {
 
 void init_counter_sampling(void) {
     sample_counter = 0;
+    samples_per_loop = 1000 / signal_sampling_freq_hz;  // Precompute division
     new_signal_data_available = false;
-    printf("Counter-based sampling: Initialized for signal sampling\n");
+    printf("Counter-based sampling: Initialized for signal sampling (%lu samples per loop)\n", samples_per_loop);
 }
 
 // Initialize sleep value and function pointer (call once at startup)
@@ -3690,10 +3692,6 @@ int main(int argc, char *argv[]) {
             
             // Check for emergency drop conditions
             check_emergency_drop(last_bitrate, filtered_rssi, emergency_rssi_threshold, emergency_bitrate);
-            
-#ifdef DEBUG
-            // Signal data processed - debug flag handled by new_signal_data_available
-#endif
         }
         
         // Process signal data if available (hardware clock optimized)
@@ -3755,10 +3753,11 @@ int main(int argc, char *argv[]) {
         mspLQ((int)filtered_rssi);
         if (rssi == 0) {
 #ifdef DEBUG
-            printf("ERROR: RSSI is zero - driver path issue detected!\n");
-            printf("Current driver path: %s\n", driverpath);
-            printf("Please check WiFi card configuration and driver paths\n");
-            printf("System will continue but bitrate changes are disabled\n");
+GLOBAL_DEBUG_APPEND("ERROR: RSSI is zero - driver path issue detected!\n");
+GLOBAL_DEBUG_APPEND("Current driver path: %s\n", driverpath);
+GLOBAL_DEBUG_APPEND("Please check WiFi card configuration and driver paths\n");
+GLOBAL_DEBUG_APPEND("System will continue but bitrate changes are disabled\n");
+GLOBAL_DEBUG_FLUSH(); // Flush debug messages before continue
 #endif
             main_loop_sleep(true, false); // Error condition sleep
             continue;
@@ -3767,7 +3766,8 @@ int main(int argc, char *argv[]) {
         // Skip bitrate control if WiFi driver is not available
         if (!wifi_driver_available) {
 #ifdef DEBUG
-            printf("WiFi driver not available - skipping bitrate control\n");
+ GLOBAL_DEBUG_APPEND("WiFi driver not available - skipping bitrate control\n");
+GLOBAL_DEBUG_FLUSH(); // Flush debug messages before continue
 #endif
             main_loop_sleep(true, false); // Error condition sleep
             continue;
