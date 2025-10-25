@@ -88,10 +88,10 @@ static const wifi_card_config_t wifi_card_configs[] = {
         .power_save_command = "iw wlan0 set power_save off",
         .max_tx_power_command = "iw wlan0 set txpower fixed 30",
         .pit_tx_power_command = "iw wlan0 set txpower fixed 10",
-        .driver_reload_command = "modprobe -r 8812au && modprobe 8812au rtw_power_mgnt=0 rtw_en_autosleep=0",
+        .driver_reload_command = "modprobe -r 88XXau && modprobe 88XXau rtw_power_mgnt=0",
         .power_save_description = "RTL8812AU (8812au driver)",
         .mcs_hardware_description = "RTL8812AU - Aggressive thresholds (maximum performance)",
-        .modprobe_config_message = "options 8812au rtw_power_mgnt=0 rtw_en_autosleep=0"
+        .modprobe_config_message = "options 88XXau rtw_power_mgnt=0"
     },
     {
         .name = "873xbu",
@@ -258,7 +258,7 @@ static char driverpath[256] = {0};
 // =============================================================================
 
 // Forward declarations
-void disable_autopower(void);
+void autopower(void);
 void set_maximum_tx_power(void);
 extern int wifi_driver_available;
 
@@ -342,8 +342,8 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     // Print WiFi power management configuration
     printf("WiFi power saving: %s\n", disable_wifi_power_save ? "DISABLED (recommended for FPV)" : "ENABLED (not recommended for FPV)");
     
-    // Disable WiFi power saving for FPV stability
-    disable_autopower();
+    // Enable automatic TX power for initial connectivity
+    autopower();
     
     // Set maximum transmission power for maximum FPV range
     set_maximum_tx_power();
@@ -354,6 +354,7 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     // =============================================================================
     // 5. NETWORK BUFFER OPTIMIZATION (General WiFi Performance)
     // =============================================================================
+
     printf("Optimizing network buffers for WiFi performance...\n");
     int result1 = execute_command("sysctl -w net.core.rmem_default=16384");
     int result2 = execute_command("sysctl -w net.core.rmem_max=65536");
@@ -370,6 +371,34 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     } else {
         printf("Network buffers optimized for WiFi performance\n");
     }
+    printf("WiFi Access Point: Initializing APFPV access point...\n");
+    
+    // Start the WiFi adapter (sets up OpenIPC access point)
+    int adapter_result = execute_command("adapter start");
+    if (adapter_result != 0) {
+        printf("WARNING: Failed to start WiFi adapter (exit code: %d)\n", adapter_result);
+    } else {
+        printf("WiFi Access Point: Adapter started successfully\n");
+    }
+    sleep(2);
+    
+    // Start DHCP server for client connections
+    int dhcp_result = execute_command("udhcpd /etc/udhcpd.conf");
+    if (dhcp_result != 0) {
+        printf("WARNING: Failed to start DHCP server (exit code: %d)\n", dhcp_result);
+    } else {
+        printf("WiFi Access Point: DHCP server started successfully\n");
+    }
+    sleep(1);
+    
+    
+    // Verify access point is running
+    printf("WiFi Access Point Status:\n");
+    execute_command("iw dev wlan0 info | grep -E 'ssid|channel|type|txpower'");
+    
+    printf("WiFi Access Point: Initialization complete\n");
+    // Enable automatic TX power for initial connectivity
+    autopower();
     
     printf("WiFi card initialization complete\n");
     return 1;
@@ -642,7 +671,6 @@ bool should_change_bitrate(int new_bitrate, int current_bitrate, unsigned long s
                           unsigned long up_cooldown_ms, int min_change_percent, unsigned long emergency_cooldown_ms);
 void toggle_racemode(void);
 int toggle_racemode_http(void);
-void disable_autopower(void);
 void set_maximum_tx_power(void);
 void enable_pit_mode(void);
 void disable_pit_mode(void);
@@ -684,6 +712,7 @@ void pid_reset(pid_controller_t *pid);
 void init_pit_mode();
 void init_race_mode();
 void init_http_system();
+void init_wifi_access_point();
 void pit_mode_enable_8812au(void);
 void pit_mode_disable_8812au(void);
 void pit_mode_enable_8812eu2(void);
@@ -1236,13 +1265,17 @@ int wifi_driver_available = 1;  // Assume available until proven otherwise
 
 // Initialize RSSI and dBm reading method function pointers (call once at startup)
 void init_rssi_read_method() {
-    // Set function pointers based on RSSI read method configuration (never changes during runtime)
+    printf("DEBUG: init_rssi_read_method called, use_file_rewind_method=%d\n", use_file_rewind_method);
+    
+    // Set function pointers based on RSSI read method configuration (applies to BOTH RSSI and dBm)
     if (use_file_rewind_method) {
         rssi_read_function = get_rssi_file_rewind;
         dbm_read_function = get_dbm_file_rewind;
+        printf("DEBUG: Using file rewind method for RSSI and dBm\n");
     } else {
         rssi_read_function = get_rssi_mmap;
         dbm_read_function = get_dbm_mmap;
+        printf("DEBUG: Using mmap method for RSSI and dBm\n");
     }
     
     
@@ -1292,9 +1325,9 @@ void init_race_mode() {
         snprintf(cmd1, sizeof(cmd1), "echo 20 > %s/ack_timeout", driverpath);
         int ack_result = execute_command(cmd1);
         if (ack_result != 0) {
-#ifdef DEBUG
-            printf("Warning: Failed to set ack_timeout\n");
-#endif
+            printf("WARNING: Could not set ack_timeout (driver may be protected)\n");
+        } else {
+            printf("Racing mode: ACK timeout set to 20ms\n");
         }
         
         // Override bitrate max for racing (4 Mbps)
@@ -1347,6 +1380,10 @@ void init_http_system() {
         }
     }
     
+    // CRITICAL: Call autopower after race mode setup for WiFi connectivity
+    // This matches the original implementation timing
+    autopower();
+    
     printf("HTTP system: Video configuration complete\n");
 }
 
@@ -1356,7 +1393,7 @@ sleep_config_t sleep_config = {
     .normal_mode_ms = 20,       // +20ms for normal mode
     .high_perf_mode_ms = 5,     // +5ms for high performance
     .ultra_low_mode_ms = 0,     // No extra sleep for ultra-low latency
-    .error_condition_ms = 100, // 100ms for error conditions
+    .error_condition_ms = 10,   // 10ms for error conditions (was 100ms)
     .smart_sleep_enabled = 0    // Default: simple sleep (off)
 };
 
@@ -1369,6 +1406,7 @@ static pid_controller_t bitrate_pid = {
     .last_error = 0,    // No previous error
     .last_output = 0    // No previous output
 };
+
 
 // Initialize control algorithm function pointer (call once at startup)
 void init_control_algorithm() {
@@ -2309,38 +2347,25 @@ void check_emergency_drop(int current_bitrate, float filtered_rssi,
         pid_reset(&bitrate_pid);
         }
         
-        // CRITICAL: Re-disable power saving after emergency recovery
+        // CRITICAL: Re-enable automatic power after emergency recovery
         // Ensures stable connection during recovery
-        disable_autopower();
+        autopower();
     }
 }
 
-// Disable WiFi power saving for stable FPV connections
-// Critical for both 8812au and 8812eu2 driver stability during dynamic activities
-void disable_autopower() {
-    if (!disable_wifi_power_save) {
-        printf("WiFi power saving is ENABLED - NOT RECOMMENDED for FPV!\n");
-        printf("This may cause connection instability during dynamic activities\n");
-        return;
+// Enable automatic TX power adjustment for WiFi connectivity
+// Critical for initial WiFi connection establishment
+void autopower() {
+    // Try to set driver-specific TX power for RTL8812AU
+    int result1 = execute_command("echo 30 > /proc/net/rtl88xxau/wlan0/target_tx_power");
+    if (result1 != 0) {
+        printf("WARNING: Could not write to target_tx_power (driver may be protected)\n");
     }
     
-    // Get WiFi card configuration from lookup table
-    const wifi_card_config_t* config = get_wifi_card_config(wificard);
-    if (!config) {
-        printf("ERROR: Unknown WiFi card type for power management: %s\n", wificard);
-        return;
-    }
-    
-    // Execute power save command from lookup table
-    printf("Disabling power saving for %s...\n", config->power_save_description);
-    int result = execute_command(config->power_save_command);
-    if (result != 0) {
-#ifdef DEBUG
-        printf("Warning: WiFi power save disable command failed with status %d\n", result);
-        printf("Command attempted: %s\n", config->power_save_command);
-#endif
-    } else {
-        printf("WiFi power saving DISABLED - Critical for FPV stability\n");
+    // Try iw command as fallback
+    int result2 = execute_command("iw dev wlan0 set txpower fixed 20");
+    if (result2 != 0) {
+        printf("WARNING: Could not set TX power via iw command\n");
     }
 }
 
@@ -2920,7 +2945,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
              char *racing_rssi_filter_chain_config, char *racing_dbm_filter_chain_config,
              char *racing_video_resolution, int *racing_exposure, int *racing_fps,
              int *signal_sampling_interval, unsigned long *emergency_cooldown,
-             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled, int *enable_maximum_tx_power, int *auto_exposure_enabled) {
+             int *control_algorithm, int *signal_sampling_freq_hz, int *hardware_rssi_offset, int *cooldown_enabled, int *auto_exposure_enabled) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         printf("No config file found\n");
@@ -3060,7 +3085,7 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
             continue;
         }
         if (strncmp(line, "enable_maximum_tx_power=", 23) == 0) {
-            sscanf(line + 23, "%d", enable_maximum_tx_power);
+            sscanf(line + 23, "%d", &enable_maximum_tx_power);
             continue;
         }
         if (strncmp(line, "auto_exposure_enabled=", 22) == 0) {
@@ -3072,7 +3097,10 @@ void config(const char *filename, int *BITRATE_MAX, char *WIFICARD, int *RACE, i
             continue;
         }
         if (strncmp(line, "rssi_read_method=", 17) == 0) {
-            sscanf(line + 17, "%d", &use_file_rewind_method);
+            int method;
+            sscanf(line + 17, "%d", &method);
+            use_file_rewind_method = (method == 1);  // 1 = file rewind, 0 = mmap
+            printf("DEBUG: Config parsed rssi_read_method=%d, use_file_rewind_method=%d\n", method, use_file_rewind_method);
             continue;
         }
         // Sleep configuration
@@ -3307,7 +3335,7 @@ int get_rssi_mmap(const char *readcmd) {
         if (mapped_size == 0) {
             close(fd);
 #ifdef DEBUG
-            GLOBAL_DEBUG_BUILD(true, "DEBUG: sta_tp_info file is empty: %s ", path);
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: No WiFi stations connected (sta_tp_info empty): %s ", path);
 #endif
             return -1;  // Return error code instead of 0 RSSI
         }
@@ -3440,6 +3468,14 @@ int get_dbm_mmap(const char *readcmd) {
         }
         
         mapped_size = st.st_size;
+        if (mapped_size == 0) {
+            close(fd);
+#ifdef DEBUG
+            GLOBAL_DEBUG_BUILD(true, "DEBUG: No WiFi stations connected (sta_tp_info empty for dBm): %s ", path);
+#endif
+            return -100;  // Return error code
+        }
+        
         mapped_data = mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
         close(fd);
         
@@ -3540,7 +3576,7 @@ int main(int argc, char *argv[]) {
            racing_rssi_filter_chain_config, racing_dbm_filter_chain_config,
            racing_video_resolution, &racing_exposure, &racing_fps,
            &signal_sampling_interval, &emergency_cooldown_ms, &control_algorithm,
-           &signal_sampling_freq_hz, &hardware_rssi_offset, &cooldown_enabled, &enable_maximum_tx_power, &auto_exposure_enabled);
+           &signal_sampling_freq_hz, &hardware_rssi_offset, &cooldown_enabled, &auto_exposure_enabled);
     
     // Only declare truly local variables for the main loop
     int rssi = 0;
@@ -3570,12 +3606,8 @@ int main(int argc, char *argv[]) {
     init_filters(kalman_rssi_process, kalman_rssi_measure, kalman_dbm_process, kalman_dbm_measure,
                  lpf_cutoff_freq, lpf_sample_freq);
     
-
     
-    // Initialize WiFi card with all configurations
-    if (!wifi_card_init(wificard, driverpath)) {
-        printf("WiFi card initialization failed - continuing with limited functionality\n");
-    }
+
     
     // Print signal sampling configuration
     printf("Signal sampling interval: %d frames (%.1fHz at %d FPS)\n", 
