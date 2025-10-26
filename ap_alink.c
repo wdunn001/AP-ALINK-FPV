@@ -53,6 +53,8 @@ typedef struct {
     const char* power_save_command;
     const char* max_tx_power_command;
     const char* pit_tx_power_command;
+    const char* regulatory_domain_command;
+    const char* bitrate_command;
     const char* driver_reload_command;
     const char* power_save_description;
     const char* mcs_hardware_description;
@@ -69,9 +71,11 @@ static const wifi_card_config_t wifi_card_configs[] = {
         .pit_mode_disable_func = pit_mode_disable_8812eu2,
         .rssi_format_parser = parse_rssi_8812eu_format,
         .dbm_format_parser = parse_dbm_8812eu_format,
-        .power_save_command = "iw wlan0 set power_save off",
-        .max_tx_power_command = "iw wlan0 set txpower fixed 30",
-        .pit_tx_power_command = "iw wlan0 set txpower fixed 10",
+        .power_save_command = "iw dev wlan0 set power_save off",
+        .max_tx_power_command = "iw dev wlan0 set txpower fixed 30",
+        .pit_tx_power_command = "iw dev wlan0 set txpower fixed 10",
+        .regulatory_domain_command = "iw reg set 00",
+        .bitrate_command = "iw dev wlan0 set bitrates legacy-5 12 18 24 36 48 54",
         .driver_reload_command = "modprobe -r 8812eu2 && modprobe 8812eu2 rtw_power_mgnt=0 rtw_en_autosleep=0",
         .power_save_description = "RTL8812EU (8812eu2 driver)",
         .mcs_hardware_description = "RTL8812EU - Conservative thresholds (+2 dBm, maximum stability)",
@@ -85,9 +89,11 @@ static const wifi_card_config_t wifi_card_configs[] = {
         .pit_mode_disable_func = pit_mode_disable_8812au,
         .rssi_format_parser = parse_rssi_8812au_format,
         .dbm_format_parser = parse_dbm_8812au_format,
-        .power_save_command = "iw wlan0 set power_save off",
-        .max_tx_power_command = "iw wlan0 set txpower fixed 30",
-        .pit_tx_power_command = "iw wlan0 set txpower fixed 10",
+        .power_save_command = "iw dev wlan0 set power_save off",
+        .max_tx_power_command = "iw dev wlan0 set txpower fixed 30",
+        .pit_tx_power_command = "iw dev wlan0 set txpower fixed 10",
+        .regulatory_domain_command = "iw reg set 00",
+        .bitrate_command = "iw dev wlan0 set bitrates legacy-5 12 18 24 36 48 54",
         .driver_reload_command = "modprobe -r 88XXau && modprobe 88XXau rtw_power_mgnt=0",
         .power_save_description = "RTL8812AU (8812au driver)",
         .mcs_hardware_description = "RTL8812AU - Aggressive thresholds (maximum performance)",
@@ -101,9 +107,11 @@ static const wifi_card_config_t wifi_card_configs[] = {
         .pit_mode_disable_func = pit_mode_disable_873xbu,
         .rssi_format_parser = parse_rssi_873xbu_format,
         .dbm_format_parser = parse_dbm_873xbu_format,
-        .power_save_command = "iw wlan0 set power_save off",
-        .max_tx_power_command = "iw wlan0 set txpower fixed 20",
-        .pit_tx_power_command = "iw wlan0 set txpower fixed 5",
+        .power_save_command = "iw dev wlan0 set power_save off",
+        .max_tx_power_command = "iw dev wlan0 set txpower fixed 20",
+        .pit_tx_power_command = "iw dev wlan0 set txpower fixed 5",
+        .regulatory_domain_command = "iw reg set 00",
+        .bitrate_command = "iw dev wlan0 set bitrates legacy-5 12 18 24 36 48 54",
         .driver_reload_command = "modprobe -r 873xbu && modprobe 873xbu rtw_power_mgnt=0 rtw_en_autosleep=0",
         .power_save_description = "RTL873xBU (873xbu driver)",
         .mcs_hardware_description = "RTL873xBU - Balanced thresholds (+1 dBm, optimal balance)",
@@ -257,8 +265,6 @@ static char driverpath[256] = {0};
 // WIFI CARD INITIALIZATION
 // =============================================================================
 
-// Forward declarations
-void autopower(void);
 void set_maximum_tx_power(void);
 extern int wifi_driver_available;
 
@@ -339,11 +345,7 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     // =============================================================================
     printf("Configuring WiFi power management...\n");
     
-    // Print WiFi power management configuration
-    printf("WiFi power saving: %s\n", disable_wifi_power_save ? "DISABLED (recommended for FPV)" : "ENABLED (not recommended for FPV)");
-    
-    // Enable automatic TX power for initial connectivity
-    autopower();
+
     
     // Set maximum transmission power for maximum FPV range
     set_maximum_tx_power();
@@ -371,6 +373,44 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     } else {
         printf("Network buffers optimized for WiFi performance\n");
     }
+    
+    // =============================================================================
+    // DEVICE-SPECIFIC OPTIMIZATIONS
+    // =============================================================================
+    printf("Applying device-specific optimizations...\n");
+    
+    // Get WiFi card configuration from lookup table
+    const wifi_card_config_t* wifi_config = get_wifi_card_config(wificard);
+    if (!wifi_config) {
+        printf("ERROR: Unknown WiFi card type for optimizations: %s\n", wificard);
+    } else {
+        // Set regulatory domain (device-specific)
+        int reg_result = execute_command(wifi_config->regulatory_domain_command);
+        if (reg_result != 0) {
+            printf("WARNING: Could not set regulatory domain\n");
+        } else {
+            printf("Regulatory domain set successfully\n");
+        }
+        
+        // Set maximum TX power (device-specific)
+        int max_power_result = execute_command(wifi_config->max_tx_power_command);
+        if (max_power_result != 0) {
+            printf("WARNING: Could not set maximum TX power\n");
+        } else {
+            printf("Maximum TX power set successfully\n");
+        }
+        
+        // Optimize bitrates (device-specific)
+        int bitrate_result = execute_command(wifi_config->bitrate_command);
+        if (bitrate_result != 0) {
+            printf("WARNING: Could not set optimized bitrates\n");
+        } else {
+            printf("Optimized bitrates set successfully\n");
+        }
+    }
+    
+    printf("Device-specific optimizations complete\n");
+    
     printf("WiFi Access Point: Initializing APFPV access point...\n");
     
     // Start the WiFi adapter (sets up OpenIPC access point)
@@ -397,8 +437,7 @@ static int wifi_card_init(const char* wificard_type, char* driverpath) {
     execute_command("iw dev wlan0 info | grep -E 'ssid|channel|type|txpower'");
     
     printf("WiFi Access Point: Initialization complete\n");
-    // Enable automatic TX power for initial connectivity
-    autopower();
+ 
     
     printf("WiFi card initialization complete\n");
     return 1;
@@ -1379,10 +1418,7 @@ void init_http_system() {
                    fps, calculated_exposure);
         }
     }
-    
-    // CRITICAL: Call autopower after race mode setup for WiFi connectivity
-    // This matches the original implementation timing
-    autopower();
+
     
     printf("HTTP system: Video configuration complete\n");
 }
@@ -2347,27 +2383,10 @@ void check_emergency_drop(int current_bitrate, float filtered_rssi,
         pid_reset(&bitrate_pid);
         }
         
-        // CRITICAL: Re-enable automatic power after emergency recovery
-        // Ensures stable connection during recovery
-        autopower();
+  
     }
 }
 
-// Enable automatic TX power adjustment for WiFi connectivity
-// Critical for initial WiFi connection establishment
-void autopower() {
-    // Try to set driver-specific TX power for RTL8812AU
-    int result1 = execute_command("echo 30 > /proc/net/rtl88xxau/wlan0/target_tx_power");
-    if (result1 != 0) {
-        printf("WARNING: Could not write to target_tx_power (driver may be protected)\n");
-    }
-    
-    // Try iw command as fallback
-    int result2 = execute_command("iw dev wlan0 set txpower fixed 20");
-    if (result2 != 0) {
-        printf("WARNING: Could not set TX power via iw command\n");
-    }
-}
 
 // Set WiFi transmission power to maximum for maximum range
 // Critical for FPV applications where range is essential
@@ -2418,12 +2437,21 @@ void setup_driver_power_management(void) {
     // Execute driver reload command from lookup table
     int result = execute_command(config->driver_reload_command);
         
-        if (result != 0) {
+    if (result != 0) {
         printf("Warning: Failed to reload %s driver with power management disabled\n", config->name);
         printf("You may need to manually add to /etc/modprobe.d/%s.conf:\n", config->name);
         printf("%s\n", config->modprobe_config_message);
-        } else {
+    } else {
         printf("%s driver reloaded with power management DISABLED\n", config->name);
+    }
+    
+    // Execute power save command to disable power saving
+    printf("Disabling WiFi power saving via iw command...\n");
+    int power_result = execute_command(config->power_save_command);
+    if (power_result != 0) {
+        printf("Warning: Failed to disable power saving via iw command\n");
+    } else {
+        printf("WiFi power saving DISABLED via iw command\n");
     }
 }
 
@@ -2483,7 +2511,7 @@ void pit_mode_enable_8812au(void) {
     printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
     
     char command[128];
-    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
+    snprintf(command, sizeof(command), "iw dev wlan0 set txpower fixed 10");
     printf("PIT MODE: Reducing TX power for RTL8812AU to 10 dBm (battery conservation)...\n");
     
     int result = execute_command(command);
@@ -2499,7 +2527,7 @@ void pit_mode_disable_8812au(void) {
     printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
     
     char command[128];
-    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+    snprintf(command, sizeof(command), "iw dev wlan0 set txpower fixed 30");
     printf("PIT MODE: Restoring maximum TX power for RTL8812AU to 30 dBm...\n");
     
     int result = execute_command(command);
@@ -2517,7 +2545,7 @@ void pit_mode_enable_8812eu2(void) {
     printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
     
     char command[128];
-    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 10");
+    snprintf(command, sizeof(command), "iw dev wlan0 set txpower fixed 10");
     printf("PIT MODE: Reducing TX power for RTL8812EU to 10 dBm (battery conservation)...\n");
     
     int result = execute_command(command);
@@ -2533,7 +2561,7 @@ void pit_mode_disable_8812eu2(void) {
     printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
     
     char command[128];
-    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 30");
+    snprintf(command, sizeof(command), "iw dev wlan0 set txpower fixed 30");
     printf("PIT MODE: Restoring maximum TX power for RTL8812EU to 30 dBm...\n");
     
     int result = execute_command(command);
@@ -2551,7 +2579,7 @@ void pit_mode_enable_873xbu(void) {
     printf("System will reduce TX power for battery conservation but remain responsive to HTTP calls\n");
     
     char command[128];
-    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 5");
+    snprintf(command, sizeof(command), "iw dev wlan0 set txpower fixed 5");
     printf("PIT MODE: Reducing TX power for RTL873xBU to 5 dBm (battery conservation)...\n");
     
     int result = execute_command(command);
@@ -2567,7 +2595,7 @@ void pit_mode_disable_873xbu(void) {
     printf("PIT MODE: DISABLING - Returning to full power FPV mode\n");
     
     char command[128];
-    snprintf(command, sizeof(command), "iw wlan0 set txpower fixed 20");
+    snprintf(command, sizeof(command), "iw dev wlan0 set txpower fixed 20");
     printf("PIT MODE: Restoring maximum TX power for RTL873xBU to 20 dBm...\n");
     
     int result = execute_command(command);
